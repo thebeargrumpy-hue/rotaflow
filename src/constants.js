@@ -50,3 +50,13 @@ export const INITIAL_SHIFTS = {
   "5-w0-d4":{ start:"14:00", end:"22:00", typeIdx:2, locationId:"cafe",       brk:30 },
   "6-w0-d6":{ start:"11:00", end:"19:00", typeIdx:1, locationId:"restaurant", brk:30 },
 };
+
+export function loadLocations() {
+  const saved = localStorage.getItem("rf_locations");
+  return saved ? JSON.parse(saved) : JSON.parse(JSON.stringify(LOCATIONS));
+}
+
+export function loadShiftTypes() {
+  const saved = localStorage.getItem("rf_shiftTypes");
+  return saved ? JSON.parse(saved) : JSON.parse(JSON.stringify(SHIFT_TYPES));
+}

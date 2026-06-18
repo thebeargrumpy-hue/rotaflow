@@ -3,6 +3,7 @@ import {
   DAYS, FULL_DAYS, HALF_HOURS,
   LOCATIONS, SHIFT_TYPES, ROLES, VIEW_MODES, STAFF_COLORS, WAGE_RATE,
   INITIAL_STAFF, INITIAL_SHIFTS,
+  loadLocations, loadShiftTypes,
 } from "../constants";
 import { calcHours, getMondayOf, addDays, fmtDate, isWeekend } from "../utils";
 
@@ -31,10 +32,16 @@ export default function RotaSystem() {
   });
   const [notification,   setNotification]   = useState(null);
   const [sendingEmail,   setSendingEmail]   = useState(false);
+  const [locations,      setLocations]      = useState(loadLocations);
+  const [shiftTypes,     setShiftTypes]     = useState(loadShiftTypes);
+  const [locDraft,       setLocDraft]       = useState(loadLocations);
+  const [stDraft,        setStDraft]        = useState(loadShiftTypes);
 
   useEffect(() => { localStorage.setItem("rotaflow-shifts",         JSON.stringify(shifts));            }, [shifts]);
   useEffect(() => { localStorage.setItem("rotaflow-staff",          JSON.stringify(staff));             }, [staff]);
   useEffect(() => { localStorage.setItem("rotaflow-publishedWeeks", JSON.stringify([...publishedWeeks])); }, [publishedWeeks]);
+  useEffect(() => { localStorage.setItem("rf_locations",  JSON.stringify(locations));  }, [locations]);
+  useEffect(() => { localStorage.setItem("rf_shiftTypes", JSON.stringify(shiftTypes)); }, [shiftTypes]);
 
   const numWeeks = parseInt(viewWeeks);
 
@@ -124,9 +131,30 @@ export default function RotaSystem() {
 
   function showNotif(msg){ setNotification(msg); setTimeout(()=>setNotification(null),3000); }
 
-  const getLoc  = id => LOCATIONS.find(l=>l.id===id)||LOCATIONS[0];
-  const getStype= idx=> SHIFT_TYPES[idx]||SHIFT_TYPES[0];
+  const getLoc  = id  => locations.find(l=>l.id===id)||locations[0];
+  const getStype= idx => shiftTypes[idx]||shiftTypes[0];
   const isPublished = weekStarts.every((_,wi)=>publishedWeeks.has(`${weekOffset}-${wi}`));
+
+  function deriveLocColors(hex, label) {
+    const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+    const toH=n=>Math.max(0,Math.min(255,Math.round(n))).toString(16).padStart(2,"0");
+    const bg=`#${toH(r*.1+255*.9)}${toH(g*.1+255*.9)}${toH(b*.1+255*.9)}`;
+    const text=`#${toH(r*.55)}${toH(g*.55)}${toH(b*.55)}`;
+    const short=label.split(/[\s/]+/).filter(w=>/[a-zA-Z]/.test(w[0]||"")).map(w=>w[0].toUpperCase()).join("").slice(0,4)||"?";
+    return {border:hex,dot:hex,bg,text,short};
+  }
+
+  function deriveSTColors(hex) {
+    const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+    const toH=n=>Math.max(0,Math.min(255,Math.round(n))).toString(16).padStart(2,"0");
+    return {border:hex,bg:`#${toH(r*.1+255*.9)}${toH(g*.1+255*.9)}${toH(b*.1+255*.9)}`,text:`#${toH(r*.55)}${toH(g*.55)}${toH(b*.55)}`};
+  }
+
+  function saveSettings() {
+    setLocations([...locDraft]);
+    setShiftTypes([...stDraft]);
+    showNotif("Settings saved ✓");
+  }
 
   return (
     <div style={{fontFamily:"'DM Sans',sans-serif",background:"var(--background)",minHeight:"100vh",color:"var(--foreground)"}}>
@@ -158,7 +186,7 @@ export default function RotaSystem() {
             <span style={{background:"var(--sidebar-accent)",color:"#94a3b8",fontSize:10,padding:"2px 7px",borderRadius:4,fontWeight:500}}>NMA Catering</span>
           </div>
           <div style={{display:"flex",gap:1}}>
-            {[["rota","📅 Rota"],["staff","👥 Staff"],["weekends","🏖 Weekends"],["reports","📊 Reports"]].map(([t,l])=>(
+            {[["rota","📅 Rota"],["staff","👥 Staff"],["weekends","🏖 Weekends"],["reports","📊 Reports"],["settings","⚙ Settings"]].map(([t,l])=>(
               <button key={t} className={`tb${activeTab===t?" on":""}`} onClick={()=>setActiveTab(t)}>{l}</button>
             ))}
           </div>
@@ -292,14 +320,14 @@ export default function RotaSystem() {
           {/* Legend */}
           <div style={{display:"flex",gap:10,marginTop:10,flexWrap:"wrap",alignItems:"center"}}>
             <span style={{fontSize:10,color:"var(--muted-foreground)",fontWeight:700}}>LOCATIONS:</span>
-            {LOCATIONS.map(l=>(
+            {locations.map(l=>(
               <div key={l.id} style={{display:"flex",alignItems:"center",gap:4,fontSize:11}}>
                 <div style={{width:9,height:9,borderRadius:2,background:l.bg,border:`1.5px solid ${l.border}`}}/>
                 <span style={{color:"var(--muted-foreground)"}}>{l.label}</span>
               </div>
             ))}
             <span style={{fontSize:10,color:"var(--muted-foreground)",fontWeight:700,marginLeft:6}}>TYPES:</span>
-            {SHIFT_TYPES.map(t=>(
+            {shiftTypes.map(t=>(
               <div key={t.idx} style={{display:"flex",alignItems:"center",gap:3,fontSize:11}}>
                 <div style={{width:7,height:7,borderRadius:"50%",background:t.border}}/>
                 <span style={{color:"var(--muted-foreground)"}}>{t.label}</span>
@@ -447,7 +475,7 @@ export default function RotaSystem() {
             </div>
             <div style={{background:"var(--background)",borderRadius:11,padding:16,border:"1px solid var(--border)"}}>
               <h3 style={{margin:"0 0 12px",fontSize:13,fontWeight:700}}>Shifts by Location</h3>
-              {LOCATIONS.map(l=>{
+              {locations.map(l=>{
                 const count=Object.values(shifts).filter(s=>s.locationId===l.id).length;
                 const total=Object.keys(shifts).length||1;
                 return(
@@ -493,6 +521,97 @@ export default function RotaSystem() {
         </div>
       )}
 
+      {/* ===== SETTINGS TAB ===== */}
+      {activeTab==="settings"&&(
+        <div style={{padding:"14px 18px 90px"}}>
+          <h2 style={{margin:"0 0 4px",fontSize:17,fontWeight:700}}>Settings</h2>
+          <p style={{margin:"0 0 20px",fontSize:12,color:"var(--muted-foreground)"}}>Customise locations and shift types. Changes apply after saving.</p>
+
+          {/* Locations */}
+          <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Locations</h3>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12,marginBottom:28}}>
+            {locDraft.map((loc,i)=>{
+              const orig=LOCATIONS.find(l=>l.id===loc.id);
+              return(
+                <div key={loc.id} style={{background:"#fff",border:"1px solid #E8EFF5",borderRadius:10,padding:14}}>
+                  {/* Live preview chip */}
+                  <div style={{marginBottom:10}}>
+                    <div style={{display:"inline-flex",flexDirection:"column",background:loc.bg,border:`1.5px solid ${loc.border}`,borderRadius:5,padding:"4px 7px",gap:2}}>
+                      <div style={{display:"flex",alignItems:"center",gap:3}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:loc.dot,flexShrink:0}}/>
+                        <span style={{fontSize:9,fontWeight:700,color:loc.text}}>{loc.short||"?"}</span>
+                      </div>
+                      <div style={{fontSize:9,fontWeight:700,color:"#065f46",fontFamily:"DM Mono,monospace"}}>09:00–17:00</div>
+                      <div style={{fontSize:8,color:loc.border}}>8.0h</div>
+                    </div>
+                  </div>
+                  <div style={{marginBottom:8}}>
+                    <label style={FL}>Name</label>
+                    <input value={loc.label} onChange={e=>{
+                      const label=e.target.value;
+                      const d=deriveLocColors(loc.border,label);
+                      setLocDraft(p=>p.map((l,j)=>j===i?{...l,label,short:d.short}:l));
+                    }} style={{...IS,fontSize:11}}/>
+                  </div>
+                  <div style={{marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+                    <label style={{...FL,margin:0}}>Colour</label>
+                    <input type="color" value={loc.border} onChange={e=>{
+                      const d=deriveLocColors(e.target.value,loc.label);
+                      setLocDraft(p=>p.map((l,j)=>j===i?{...l,...d}:l));
+                    }} style={{width:34,height:28,border:"1px solid var(--border)",borderRadius:5,cursor:"pointer",padding:2,background:"none"}}/>
+                  </div>
+                  <button onClick={()=>setLocDraft(p=>p.map((l,j)=>j===i?JSON.parse(JSON.stringify(orig)):l))}
+                    style={{background:"none",border:"none",color:"var(--muted-foreground)",fontSize:11,cursor:"pointer",textDecoration:"underline",padding:0}}>
+                    reset to default
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Shift Types */}
+          <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Shift Types</h3>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12,marginBottom:16}}>
+            {stDraft.map((st,i)=>{
+              const orig=SHIFT_TYPES.find(t=>t.idx===st.idx);
+              return(
+                <div key={st.idx} style={{background:"#fff",border:"1px solid #E8EFF5",borderRadius:10,padding:14}}>
+                  {/* Live preview */}
+                  <div style={{marginBottom:10,display:"flex",flexDirection:"column",gap:5}}>
+                    <span style={{display:"inline-block",background:st.bg,border:`2px solid ${st.border}`,borderRadius:6,padding:"3px 9px",fontSize:10,color:st.text,fontWeight:700,alignSelf:"flex-start"}}>
+                      {st.label||"…"}
+                    </span>
+                    <span style={{fontSize:9,fontWeight:700,color:st.text,fontFamily:"DM Mono,monospace"}}>09:00–17:00</span>
+                  </div>
+                  <div style={{marginBottom:8}}>
+                    <label style={FL}>Name</label>
+                    <input value={st.label} onChange={e=>setStDraft(p=>p.map((t,j)=>j===i?{...t,label:e.target.value}:t))}
+                      style={{...IS,fontSize:11}}/>
+                  </div>
+                  <div style={{marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+                    <label style={{...FL,margin:0}}>Colour</label>
+                    <input type="color" value={st.border} onChange={e=>{
+                      const d=deriveSTColors(e.target.value);
+                      setStDraft(p=>p.map((t,j)=>j===i?{...t,...d}:t));
+                    }} style={{width:34,height:28,border:"1px solid var(--border)",borderRadius:5,cursor:"pointer",padding:2,background:"none"}}/>
+                  </div>
+                  <button onClick={()=>setStDraft(p=>p.map((t,j)=>j===i?JSON.parse(JSON.stringify(orig)):t))}
+                    style={{background:"none",border:"none",color:"var(--muted-foreground)",fontSize:11,cursor:"pointer",textDecoration:"underline",padding:0}}>
+                    reset to default
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Fixed save bar */}
+          <div style={{position:"fixed",bottom:0,left:0,right:0,background:"var(--background)",borderTop:"1px solid var(--border)",padding:"12px 20px",display:"flex",justifyContent:"flex-end",alignItems:"center",gap:12,zIndex:100}}>
+            <span style={{fontSize:12,color:"var(--muted-foreground)"}}>Changes only apply to this browser</span>
+            <button onClick={saveSettings} style={{...SB,padding:"8px 24px",fontSize:13}}>Save changes</button>
+          </div>
+        </div>
+      )}
+
       {/* ===== SHIFT MODAL ===== */}
       {showShiftModal&&selectedCell&&(()=>{
         const member=staff.find(s=>s.id===selectedCell.staffId);
@@ -520,7 +639,7 @@ export default function RotaSystem() {
               <div style={{marginBottom:11}}>
                 <label style={FL}>Location</label>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
-                  {LOCATIONS.map(l=>(
+                  {locations.map(l=>(
                     <button key={l.id} onClick={()=>setShiftEdit(p=>({...p,locationId:l.id}))}
                       style={{background:shiftEdit.locationId===l.id?l.bg:"var(--secondary)",border:`2px solid ${shiftEdit.locationId===l.id?l.border:"var(--border)"}`,borderRadius:7,padding:"6px 8px",fontSize:11,fontFamily:"inherit",color:shiftEdit.locationId===l.id?l.text:"var(--muted-foreground)",cursor:"pointer",fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:5}}>
                       <div style={{width:7,height:7,borderRadius:"50%",background:shiftEdit.locationId===l.id?l.dot:"#CBD5E0",flexShrink:0}}/>
@@ -532,7 +651,7 @@ export default function RotaSystem() {
               <div style={{marginBottom:11}}>
                 <label style={FL}>Shift Type</label>
                 <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                  {SHIFT_TYPES.map(t=>(
+                  {shiftTypes.map(t=>(
                     <button key={t.idx} onClick={()=>setShiftEdit(p=>({...p,typeIdx:t.idx}))}
                       style={{background:t.bg,border:`2px solid ${shiftEdit.typeIdx===t.idx?t.border:"transparent"}`,borderRadius:6,padding:"4px 8px",fontSize:10,fontFamily:"inherit",color:t.text,cursor:"pointer",fontWeight:700}}>
                       {t.label}
