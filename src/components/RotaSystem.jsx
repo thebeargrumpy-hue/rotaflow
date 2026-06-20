@@ -96,6 +96,13 @@ export default function RotaSystem() {
   const [editingRowId,      setEditingRowId]      = useState(null);
   const [absencePickerDate, setAbsencePickerDate] = useState(null);
   const [absenceModal,      setAbsenceModal]      = useState(null); // { staffId, dateKey, code }
+  const [shiftModalTab,     setShiftModalTab]     = useState("shift"); // "shift"|"absence"
+  const [absencePickerCode, setAbsencePickerCode] = useState("H");
+  const [staffDividers,     setStaffDividers]     = useState(()=>{
+    try{ const s=localStorage.getItem("rotaflow_dividers"); if(s) return JSON.parse(s); }catch{}
+    return {};
+  });
+  const [editingDividerId,  setEditingDividerId]  = useState(null);
   const [absenceViewYear,   setAbsenceViewYear]   = useState(()=>new Date().getFullYear());
   const [absenceViewMonth,  setAbsenceViewMonth]  = useState(()=>new Date().getMonth());
   const profileViewYear = new Date().getFullYear();
@@ -124,6 +131,7 @@ export default function RotaSystem() {
   useEffect(()=>{
     localStorage.setItem("rotaflow_daily_info", JSON.stringify({ rows:dailyInfoRows, values:dailyInfoValues }));
   },[dailyInfoRows,dailyInfoValues]);
+  useEffect(()=>{ localStorage.setItem("rotaflow_dividers", JSON.stringify(staffDividers)); },[staffDividers]);
 
   // ── derived values ───────────────────────────────────────────────────────
   const numWeeks = parseInt(viewWeeks);
@@ -163,9 +171,8 @@ export default function RotaSystem() {
         const dk=fmtDateKey(date);
         const absCode=(s.absences||{})[dk];
         if(absCode){
-          // Absence day: all codes count toward total hours; U (Unpaid) excluded from cost
-          hours+=dailyHrs;
-          if(absCode!=="U") wageHours+=dailyHrs;
+          // U (Unpaid) counts as 0 for both hours and cost; all other absence codes are paid hours
+          if(absCode!=="U"){ hours+=dailyHrs; wageHours+=dailyHrs; }
         } else {
           const k=`${s.id}-w${weekIdx}-d${dayIdx}`;
           if(shifts[k]){
@@ -198,6 +205,8 @@ export default function RotaSystem() {
     const key=`${staffId}-w${weekIdx}-d${dayIdx}`;
     setSelectedCell({staffId,weekIdx,dayIdx,key});
     setShiftEdit(shifts[key]||{start:"09:00",end:"17:00",typeIdx:0,locationId:"restaurant",brk:30});
+    setShiftModalTab("shift");
+    setAbsencePickerCode("H");
     setShowShiftModal(true);
   }
 
@@ -287,6 +296,51 @@ export default function RotaSystem() {
 
   function renameInfoRow(id,label){
     setDailyInfoRows(p=>p.map(r=>r.id===id?{...r,label}:r));
+  }
+
+  function deleteInfoRow(id){
+    if(!window.confirm("Delete this row and all its values?")) return;
+    setDailyInfoRows(p=>p.filter(r=>r.id!==id));
+    setDailyInfoValues(p=>{
+      const next={};
+      Object.entries(p).forEach(([wk,rows])=>{
+        const {[id]:_removed,...rest}=rows;
+        next[wk]=rest;
+      });
+      return next;
+    });
+  }
+
+  function addDivider(dept,beforeStaffId){
+    const id="div_"+Date.now();
+    setStaffDividers(p=>({...p,[dept]:[...(p[dept]||[]),{id,label:"Section",beforeStaffId}]}));
+    setEditingDividerId(id);
+  }
+
+  function renameDivider(dept,id,label){
+    setStaffDividers(p=>({...p,[dept]:(p[dept]||[]).map(d=>d.id===id?{...d,label}:d)}));
+  }
+
+  function deleteDivider(dept,id){
+    setStaffDividers(p=>({...p,[dept]:(p[dept]||[]).filter(d=>d.id!==id)}));
+  }
+
+  function moveDivider(dept,id,direction,visibleStaff){
+    setStaffDividers(p=>{
+      const divs=(p[dept]||[]);
+      const div=divs.find(d=>d.id===id);
+      if(!div) return p;
+      const curIdx=div.beforeStaffId===null?-1:visibleStaff.findIndex(m=>m.id===div.beforeStaffId);
+      let nextBeforeId;
+      if(direction==="up"){
+        if(curIdx<=0) return p; // already at top (null) or before first
+        nextBeforeId=curIdx===1?null:visibleStaff[curIdx-1].id;
+      } else {
+        if(curIdx>=visibleStaff.length-1) return p; // already before last member
+        nextBeforeId=visibleStaff[curIdx+1].id;
+      }
+      return {...p,[dept]:divs.map(d=>d.id===id?{...d,beforeStaffId:nextBeforeId}:d)};
+    });
   }
 
   function setDailyInfoCell(wk,rowId,dk,val){
@@ -427,20 +481,27 @@ export default function RotaSystem() {
               {/* Daily info rows */}
               {dailyInfoRows.map((row,ri)=>(
                 <div key={row.id} style={{display:"grid",gridTemplateColumns:`190px repeat(${allDays.length},1fr) 66px`,borderTop:"1px solid var(--border)",background:ri%2===0?"var(--background)":"hsl(220 25% 98%)"}}>
-                  <div style={{padding:"3px 8px",display:"flex",alignItems:"center",borderRight:"1px solid var(--border)"}}>
+                  <div style={{padding:"3px 8px",display:"flex",alignItems:"center",gap:4,borderRight:"1px solid var(--border)"}}>
                     {editingRowId===row.id?(
                       <input autoFocus value={row.label}
                         onChange={e=>renameInfoRow(row.id,e.target.value)}
                         onBlur={()=>setEditingRowId(null)}
                         onKeyDown={e=>e.key==="Enter"&&setEditingRowId(null)}
-                        style={{...IS,fontSize:11,padding:"2px 5px",height:24,width:"100%"}}/>
+                        style={{...IS,fontSize:11,padding:"2px 5px",height:24,flex:1}}/>
                     ):(
                       <button onClick={()=>setEditingRowId(row.id)}
-                        style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600,color:"var(--muted-foreground)",display:"flex",alignItems:"center",gap:4,padding:0,textAlign:"left",width:"100%"}}>
+                        style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600,color:"var(--muted-foreground)",display:"flex",alignItems:"center",gap:4,padding:0,textAlign:"left",flex:1,minWidth:0}}>
                         <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{row.label}</span>
                         <span style={{fontSize:9,opacity:.4,flexShrink:0}}>✎</span>
                       </button>
                     )}
+                    <button onClick={()=>deleteInfoRow(row.id)}
+                      title="Delete row"
+                      style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:"var(--muted-foreground)",opacity:.4,padding:"0 2px",lineHeight:1,flexShrink:0}}
+                      onMouseEnter={e=>e.currentTarget.style.opacity=1}
+                      onMouseLeave={e=>e.currentTarget.style.opacity=.4}>
+                      ✕
+                    </button>
                   </div>
                   {allDays.map(({date,key})=>{
                     const dk=fmtDateKey(date);
@@ -468,64 +529,125 @@ export default function RotaSystem() {
                 </div>
               </div>
 
-              {/* Staff rows */}
-              {filteredStaff.map((member,mi)=>{
-                const stats=staffStats[member.id]||{hours:0,wkndShifts:0};
-                const target=member.contracted*numWeeks;
-                const over=stats.hours>target;
-                return(
-                  <div key={member.id} style={{display:"grid",gridTemplateColumns:`190px repeat(${allDays.length},1fr) 66px`,borderTop:"1px solid var(--border)",background:mi%2===0?"var(--background)":"var(--secondary)"}}>
-                    <div style={{padding:"5px 8px",display:"flex",alignItems:"center",gap:6}}>
-                      <div style={{width:26,height:26,borderRadius:"50%",background:member.color,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,flexShrink:0}}>{member.avatar}</div>
-                      <div style={{minWidth:0}}>
-                        <div style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:130}}>{member.name}</div>
-                        <div style={{fontSize:9,color:"var(--muted-foreground)"}}>{member.role}</div>
-                      </div>
-                    </div>
-                    {allDays.map(({date,weekIdx,dayIdx,key})=>{
-                      const dk=fmtDateKey(date);
-                      const absCode=(member.absences||{})[dk];
-                      const absInfo=absCode?ABSENCE_CODE_MAP[absCode]:null;
-                      const sk=`${member.id}-w${weekIdx}-d${dayIdx}`, shift=shifts[sk];
-                      const l=(!absCode&&shift)?getLoc(shift.locationId):null;
-                      const wknd=isWeekend(dayIdx);
-                      return(
-                        <div key={key} className="cell"
-                          onClick={()=>absInfo
-                            ? setAbsenceModal({staffId:member.id,dateKey:dk,code:absCode})
-                            : openShiftModal(member.id,weekIdx,dayIdx)}
-                          style={{borderLeft:`1px solid ${wknd?"#dce6f0":"#EEF2F7"}`,padding:"2px 2px",minHeight:48,display:"flex",alignItems:"center",justifyContent:"center",background:wknd?(mi%2===0?"#FFF9F0":"#FEF7E8"):"inherit"}}>
-                          {absInfo?(
-                            <div className="chip" style={{background:absInfo.color,border:`1.5px solid ${absInfo.color}`,borderRadius:5,padding:"3px 4px",width:"100%"}}>
-                              <div style={{fontSize:11,fontWeight:700,color:"#fff",textAlign:"center",lineHeight:1.1}}>{absInfo.key}</div>
-                              <div style={{fontSize:8,color:"rgba(255,255,255,.85)",textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{absInfo.label}</div>
-                            </div>
-                          ):shift?(
-                            <div className="chip" style={{background:l.bg,border:`1.5px solid ${l.border}`,borderRadius:5,padding:"3px 3px",width:"100%"}}>
-                              <div style={{display:"flex",alignItems:"center",gap:2,marginBottom:1}}>
-                                <div style={{width:5,height:5,borderRadius:"50%",background:l.dot,flexShrink:0}}/>
-                                <span style={{fontSize:8,fontWeight:700,color:l.text}}>{l.short}</span>
-                              </div>
-                              <div style={{fontSize:9,fontWeight:700,color:getStype(shift.typeIdx).text,fontFamily:"DM Mono,monospace"}}>{shift.start}–{shift.end}</div>
-                              <div style={{fontSize:8,color:l.border}}>{calcHours(shift.start,shift.end,shift.brk).toFixed(1)}h</div>
-                            </div>
+              {/* Staff rows with section dividers */}
+              {(()=>{
+                const deptDividers=staffDividers[activeDept]||[];
+                const rows=[];
+                // top-of-list dividers (beforeStaffId===null)
+                deptDividers.filter(d=>d.beforeStaffId===null).forEach(div=>{
+                  rows.push({type:"divider",div});
+                });
+                filteredStaff.forEach((member,mi)=>{
+                  // dividers before this member
+                  deptDividers.filter(d=>d.beforeStaffId===member.id).forEach(div=>{
+                    rows.push({type:"divider",div});
+                  });
+                  rows.push({type:"member",member,mi});
+                });
+                let staffRowIdx=0;
+                return rows.map(row=>{
+                  if(row.type==="divider"){
+                    const {div}=row;
+                    return(
+                      <div key={div.id} style={{display:"grid",gridTemplateColumns:`190px repeat(${allDays.length},1fr) 66px`,borderTop:"1px solid var(--border)",background:"hsl(220 25% 95%)"}}>
+                        <div style={{padding:"3px 8px",display:"flex",alignItems:"center",gap:4,borderRight:"1px solid var(--border)"}}>
+                          <span style={{fontSize:9,color:"var(--muted-foreground)",opacity:.5,flexShrink:0}}>§</span>
+                          {editingDividerId===div.id?(
+                            <input autoFocus value={div.label}
+                              onChange={e=>renameDivider(activeDept,div.id,e.target.value)}
+                              onBlur={()=>setEditingDividerId(null)}
+                              onKeyDown={e=>e.key==="Enter"&&setEditingDividerId(null)}
+                              style={{...IS,fontSize:10,padding:"1px 4px",height:20,flex:1}}/>
                           ):(
-                            <span style={{color:"#C8D6E5",fontSize:15}}>+</span>
+                            <button onClick={()=>setEditingDividerId(div.id)}
+                              style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,fontWeight:700,color:"var(--muted-foreground)",display:"flex",alignItems:"center",gap:3,padding:0,flex:1,minWidth:0,textAlign:"left"}}>
+                              <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{div.label}</span>
+                              <span style={{fontSize:8,opacity:.35}}>✎</span>
+                            </button>
                           )}
+                          <button onClick={()=>moveDivider(activeDept,div.id,"up",filteredStaff)} title="Move up"
+                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"var(--muted-foreground)",opacity:.4,padding:"0 1px",flexShrink:0}}
+                            onMouseEnter={e=>e.currentTarget.style.opacity=1}
+                            onMouseLeave={e=>e.currentTarget.style.opacity=.4}>↑</button>
+                          <button onClick={()=>moveDivider(activeDept,div.id,"down",filteredStaff)} title="Move down"
+                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"var(--muted-foreground)",opacity:.4,padding:"0 1px",flexShrink:0}}
+                            onMouseEnter={e=>e.currentTarget.style.opacity=1}
+                            onMouseLeave={e=>e.currentTarget.style.opacity=.4}>↓</button>
+                          <button onClick={()=>deleteDivider(activeDept,div.id)} title="Delete divider"
+                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"var(--muted-foreground)",opacity:.4,padding:"0 1px",flexShrink:0}}
+                            onMouseEnter={e=>e.currentTarget.style.opacity=1}
+                            onMouseLeave={e=>e.currentTarget.style.opacity=.4}>✕</button>
                         </div>
-                      );
-                    })}
-                    <div style={{borderLeft:"1px solid var(--border)",padding:"4px 3px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-                      <div style={{fontSize:12,fontWeight:700,color:over?"var(--destructive)":"var(--foreground)"}}>{stats.hours.toFixed(1)}</div>
-                      <div style={{fontSize:8,color:"var(--muted-foreground)"}}>{target}h</div>
-                      <div style={{width:28,height:3,background:"var(--secondary)",borderRadius:2,marginTop:2}}>
-                        <div style={{width:`${Math.min(100,(stats.hours/target)*100)}%`,height:"100%",background:over?"var(--destructive)":"var(--primary)",borderRadius:2}}/>
+                        <div style={{gridColumn:`2 / span ${allDays.length+1}`,borderLeft:"1px solid var(--border)",display:"flex",alignItems:"center",padding:"0 8px"}}>
+                          <div style={{flex:1,height:1,background:"var(--border)",opacity:.5}}/>
+                        </div>
                       </div>
-                      <div style={{fontSize:8,color:"var(--warning)",marginTop:2}}>🏖{stats.wkndShifts}</div>
+                    );
+                  }
+                  // staff row
+                  const {member,mi}=row;
+                  const rowIdx=staffRowIdx++;
+                  const stats=staffStats[member.id]||{hours:0,wkndShifts:0};
+                  const target=member.contracted*numWeeks;
+                  const over=stats.hours>target;
+                  return(
+                    <div key={member.id} style={{display:"grid",gridTemplateColumns:`190px repeat(${allDays.length},1fr) 66px`,borderTop:"1px solid var(--border)",background:rowIdx%2===0?"var(--background)":"var(--secondary)"}}>
+                      <div style={{padding:"5px 8px",display:"flex",alignItems:"center",gap:6}}>
+                        <div style={{width:26,height:26,borderRadius:"50%",background:member.color,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,flexShrink:0}}>{member.avatar}</div>
+                        <div style={{minWidth:0,flex:1}}>
+                          <div style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:110}}>{member.name}</div>
+                          <div style={{fontSize:9,color:"var(--muted-foreground)"}}>{member.role}</div>
+                        </div>
+                        <button onClick={()=>addDivider(activeDept,member.id)} title="Insert section above"
+                          style={{background:"none",border:"none",cursor:"pointer",fontSize:9,color:"var(--muted-foreground)",opacity:.3,padding:"0 2px",flexShrink:0,lineHeight:1}}
+                          onMouseEnter={e=>e.currentTarget.style.opacity=1}
+                          onMouseLeave={e=>e.currentTarget.style.opacity=.3}>§</button>
+                      </div>
+                      {allDays.map(({date,weekIdx,dayIdx,key})=>{
+                        const dk=fmtDateKey(date);
+                        const absCode=(member.absences||{})[dk];
+                        const absInfo=absCode?ABSENCE_CODE_MAP[absCode]:null;
+                        const sk=`${member.id}-w${weekIdx}-d${dayIdx}`, shift=shifts[sk];
+                        const l=(!absCode&&shift)?getLoc(shift.locationId):null;
+                        const wknd=isWeekend(dayIdx);
+                        return(
+                          <div key={key} className="cell"
+                            onClick={()=>absInfo
+                              ? setAbsenceModal({staffId:member.id,dateKey:dk,code:absCode})
+                              : openShiftModal(member.id,weekIdx,dayIdx)}
+                            style={{borderLeft:`1px solid ${wknd?"#dce6f0":"#EEF2F7"}`,padding:"2px 2px",minHeight:48,display:"flex",alignItems:"center",justifyContent:"center",background:wknd?(rowIdx%2===0?"#FFF9F0":"#FEF7E8"):"inherit"}}>
+                            {absInfo?(
+                              <div className="chip" style={{background:absInfo.color,border:`1.5px solid ${absInfo.color}`,borderRadius:5,padding:"3px 4px",width:"100%"}}>
+                                <div style={{fontSize:11,fontWeight:700,color:"#fff",textAlign:"center",lineHeight:1.1}}>{absInfo.key}</div>
+                                <div style={{fontSize:8,color:"rgba(255,255,255,.85)",textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{absInfo.label}</div>
+                              </div>
+                            ):shift?(
+                              <div className="chip" style={{background:l.bg,border:`1.5px solid ${l.border}`,borderRadius:5,padding:"3px 3px",width:"100%"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:2,marginBottom:1}}>
+                                  <div style={{width:5,height:5,borderRadius:"50%",background:l.dot,flexShrink:0}}/>
+                                  <span style={{fontSize:8,fontWeight:700,color:l.text}}>{l.short}</span>
+                                </div>
+                                <div style={{fontSize:9,fontWeight:700,color:getStype(shift.typeIdx).text,fontFamily:"DM Mono,monospace"}}>{shift.start}–{shift.end}</div>
+                                <div style={{fontSize:8,color:l.border}}>{calcHours(shift.start,shift.end,shift.brk).toFixed(1)}h</div>
+                              </div>
+                            ):(
+                              <span style={{color:"#C8D6E5",fontSize:15}}>+</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                      <div style={{borderLeft:"1px solid var(--border)",padding:"4px 3px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+                        <div style={{fontSize:12,fontWeight:700,color:over?"var(--destructive)":"var(--foreground)"}}>{stats.hours.toFixed(1)}</div>
+                        <div style={{fontSize:8,color:"var(--muted-foreground)"}}>{target}h</div>
+                        <div style={{width:28,height:3,background:"var(--secondary)",borderRadius:2,marginTop:2}}>
+                          <div style={{width:`${Math.min(100,(stats.hours/target)*100)}%`,height:"100%",background:over?"var(--destructive)":"var(--primary)",borderRadius:2}}/>
+                        </div>
+                        <div style={{fontSize:8,color:"var(--warning)",marginTop:2}}>🏖{stats.wkndShifts}</div>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                });
+              })()}
             </div>
           </div>
 
@@ -801,7 +923,7 @@ export default function RotaSystem() {
                           <div key={d} style={{textAlign:"center",fontSize:10,fontWeight:600,color:"var(--muted-foreground)",padding:"3px 0"}}>{d}</div>
                         ))}
                       </div>
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,padding:"6px 8px"}}>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,padding:"3px 6px"}}>
                         {Array.from({length:calOffset}).map((_,i)=><div key={"e"+i}/>)}
                         {Array.from({length:calDays}).map((_,i)=>{
                           const d=i+1;
@@ -811,7 +933,7 @@ export default function RotaSystem() {
                           const wknd=isWeekendDate(calYear,calMonth,d);
                           return(
                             <button key={dk} onClick={()=>setAbsencePickerDate(dk)}
-                              style={{aspectRatio:"1",borderRadius:5,border:absencePickerDate===dk?"2px solid var(--primary)":"1px solid var(--border)",background:ci?ci.color:wknd?"hsl(220 20% 97%)":"var(--background)",color:ci?"#fff":wknd?"var(--muted-foreground)":"var(--foreground)",fontSize:11,fontWeight:ci?700:400,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                              style={{height:26,borderRadius:5,border:absencePickerDate===dk?"2px solid var(--primary)":"1px solid var(--border)",background:ci?ci.color:wknd?"hsl(220 20% 97%)":"var(--background)",color:ci?"#fff":wknd?"var(--muted-foreground)":"var(--foreground)",fontSize:10,fontWeight:ci?700:400,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}}>
                               {d}
                             </button>
                           );
@@ -1123,66 +1245,106 @@ export default function RotaSystem() {
       {showShiftModal&&selectedCell&&(()=>{
         const member=staff.find(s=>s.id===selectedCell.staffId);
         const dayDate=allDays.find(d=>d.weekIdx===selectedCell.weekIdx&&d.dayIdx===selectedCell.dayIdx)?.date;
+        const dk=dayDate?fmtDateKey(dayDate):null;
         return(
           <Backdrop onClose={()=>setShowShiftModal(false)}>
             <ModalHead title={member?.name} sub={`${FULL_DAYS[selectedCell.dayIdx]}${dayDate?`, ${fmtDate(dayDate,{day:"numeric",month:"short"})}`:""}`} onClose={()=>setShowShiftModal(false)}/>
             <div style={{padding:16}}>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:11}}>
-                {[["Start","start"],["End","end"]].map(([lbl,f])=>(
-                  <div key={f}>
-                    <label style={FL}>{lbl} Time</label>
-                    <select value={shiftEdit[f]} onChange={e=>setShiftEdit(p=>({...p,[f]:e.target.value}))} style={IS}>
-                      {HALF_HOURS.map(h=><option key={h}>{h}</option>)}
-                    </select>
-                  </div>
+              {/* Shift / Absence toggle */}
+              <div style={{display:"flex",gap:2,background:"var(--secondary)",borderRadius:8,padding:3,marginBottom:14}}>
+                {[["shift","Shift"],["absence","Absence"]].map(([k,label])=>(
+                  <button key={k} onClick={()=>setShiftModalTab(k)}
+                    style={{flex:1,border:"none",padding:"5px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",background:shiftModalTab===k?"var(--background)":"transparent",color:shiftModalTab===k?"var(--foreground)":"var(--muted-foreground)",boxShadow:shiftModalTab===k?"0 1px 3px rgba(0,0,0,.08)":"none",transition:"all .15s"}}>
+                    {label}
+                  </button>
                 ))}
               </div>
-              <div style={{marginBottom:11}}>
-                <label style={FL}>Break</label>
-                <select value={shiftEdit.brk} onChange={e=>setShiftEdit(p=>({...p,brk:Number(e.target.value)}))} style={IS}>
-                  {[0,15,20,30,45,60].map(b=><option key={b} value={b}>{b===0?"No break":`${b} mins`}</option>)}
-                </select>
-              </div>
-              <div style={{marginBottom:11}}>
-                <label style={FL}>Location</label>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
-                  {locations.map(l=>(
-                    <button key={l.id} onClick={()=>setShiftEdit(p=>({...p,locationId:l.id}))}
-                      style={{background:shiftEdit.locationId===l.id?l.bg:"var(--secondary)",border:`2px solid ${shiftEdit.locationId===l.id?l.border:"var(--border)"}`,borderRadius:7,padding:"6px 8px",fontSize:11,fontFamily:"inherit",color:shiftEdit.locationId===l.id?l.text:"var(--muted-foreground)",cursor:"pointer",fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:5}}>
-                      <div style={{width:7,height:7,borderRadius:"50%",background:shiftEdit.locationId===l.id?l.dot:"#CBD5E0",flexShrink:0}}/>
-                      {l.label}
+
+              {shiftModalTab==="shift"?(
+                <>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:11}}>
+                    {[["Start","start"],["End","end"]].map(([lbl,f])=>(
+                      <div key={f}>
+                        <label style={FL}>{lbl} Time</label>
+                        <select value={shiftEdit[f]} onChange={e=>setShiftEdit(p=>({...p,[f]:e.target.value}))} style={IS}>
+                          {HALF_HOURS.map(h=><option key={h}>{h}</option>)}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{marginBottom:11}}>
+                    <label style={FL}>Break</label>
+                    <select value={shiftEdit.brk} onChange={e=>setShiftEdit(p=>({...p,brk:Number(e.target.value)}))} style={IS}>
+                      {[0,15,20,30,45,60].map(b=><option key={b} value={b}>{b===0?"No break":`${b} mins`}</option>)}
+                    </select>
+                  </div>
+                  <div style={{marginBottom:11}}>
+                    <label style={FL}>Location</label>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+                      {locations.map(l=>(
+                        <button key={l.id} onClick={()=>setShiftEdit(p=>({...p,locationId:l.id}))}
+                          style={{background:shiftEdit.locationId===l.id?l.bg:"var(--secondary)",border:`2px solid ${shiftEdit.locationId===l.id?l.border:"var(--border)"}`,borderRadius:7,padding:"6px 8px",fontSize:11,fontFamily:"inherit",color:shiftEdit.locationId===l.id?l.text:"var(--muted-foreground)",cursor:"pointer",fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:5}}>
+                          <div style={{width:7,height:7,borderRadius:"50%",background:shiftEdit.locationId===l.id?l.dot:"#CBD5E0",flexShrink:0}}/>
+                          {l.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{marginBottom:11}}>
+                    <label style={FL}>Shift Type</label>
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                      {shiftTypes.map(t=>(
+                        <button key={t.idx} onClick={()=>setShiftEdit(p=>({...p,typeIdx:t.idx}))}
+                          style={{background:t.bg,border:`2px solid ${shiftEdit.typeIdx===t.idx?t.border:"transparent"}`,borderRadius:6,padding:"4px 8px",fontSize:10,fontFamily:"inherit",color:t.text,cursor:"pointer",fontWeight:700}}>
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{background:"var(--secondary)",borderRadius:7,padding:"8px 11px",marginBottom:11,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontSize:11,color:"var(--muted-foreground)"}}>Net duration</span>
+                    <span style={{fontSize:13,fontWeight:700,fontFamily:"DM Mono,monospace"}}>{calcHours(shiftEdit.start,shiftEdit.end,shiftEdit.brk).toFixed(2)} hrs</span>
+                  </div>
+                  {isWeekend(selectedCell.dayIdx)&&(
+                    <div style={{background:"#FFFBEB",border:`1px solid var(--warning)`,borderRadius:7,padding:"6px 10px",marginBottom:10,fontSize:11,color:"#92400e"}}>
+                      🏖 Weekend shift — will update fairness tracker
+                    </div>
+                  )}
+                  <div style={{display:"flex",gap:7}}>
+                    {shifts[selectedCell.key]&&(
+                      <button onClick={deleteShift} style={{flex:1,border:`1.5px solid var(--destructive)`,background:"#FFF5F5",color:"var(--destructive)",borderRadius:7,padding:"8px",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:600}}>Remove</button>
+                    )}
+                    <button onClick={saveShift} style={{flex:2,background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"8px",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>
+                      {shifts[selectedCell.key]?"Update Shift":"Add Shift"}
                     </button>
-                  ))}
-                </div>
-              </div>
-              <div style={{marginBottom:11}}>
-                <label style={FL}>Shift Type</label>
-                <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                  {shiftTypes.map(t=>(
-                    <button key={t.idx} onClick={()=>setShiftEdit(p=>({...p,typeIdx:t.idx}))}
-                      style={{background:t.bg,border:`2px solid ${shiftEdit.typeIdx===t.idx?t.border:"transparent"}`,borderRadius:6,padding:"4px 8px",fontSize:10,fontFamily:"inherit",color:t.text,cursor:"pointer",fontWeight:700}}>
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div style={{background:"var(--secondary)",borderRadius:7,padding:"8px 11px",marginBottom:11,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:11,color:"var(--muted-foreground)"}}>Net duration</span>
-                <span style={{fontSize:13,fontWeight:700,fontFamily:"DM Mono,monospace"}}>{calcHours(shiftEdit.start,shiftEdit.end,shiftEdit.brk).toFixed(2)} hrs</span>
-              </div>
-              {isWeekend(selectedCell.dayIdx)&&(
-                <div style={{background:"#FFFBEB",border:`1px solid var(--warning)`,borderRadius:7,padding:"6px 10px",marginBottom:10,fontSize:11,color:"#92400e"}}>
-                  🏖 Weekend shift — will update fairness tracker
-                </div>
+                  </div>
+                </>
+              ):(
+                <>
+                  <label style={{...FL,marginBottom:8}}>Select absence type</label>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:14}}>
+                    {ABSENCE_CODES.map(c=>(
+                      <button key={c.key} onClick={()=>setAbsencePickerCode(c.key)}
+                        style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:7,border:`2px solid ${absencePickerCode===c.key?c.color:"var(--border)"}`,background:absencePickerCode===c.key?c.color+"18":"var(--background)",cursor:"pointer",fontFamily:"inherit",transition:"all .12s"}}>
+                        <div style={{width:10,height:10,borderRadius:"50%",background:c.color,flexShrink:0}}/>
+                        <div style={{textAlign:"left"}}>
+                          <div style={{fontSize:11,fontWeight:700,color:absencePickerCode===c.key?c.color:"var(--foreground)"}}>{c.key}</div>
+                          <div style={{fontSize:9,color:"var(--muted-foreground)",lineHeight:1.2}}>{c.label}</div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={()=>{
+                    if(!dk) return;
+                    setAbsenceCode(selectedCell.staffId,dk,absencePickerCode);
+                    setShowShiftModal(false);
+                    showNotif("Absence recorded ✓");
+                  }}
+                    style={{width:"100%",background:ABSENCE_CODE_MAP[absencePickerCode]?.color||"var(--primary)",color:"#fff",border:"none",borderRadius:7,padding:"9px",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>
+                    Record {ABSENCE_CODE_MAP[absencePickerCode]?.label} for {dayDate?fmtDate(dayDate,{day:"numeric",month:"short"}):"this day"}
+                  </button>
+                </>
               )}
-              <div style={{display:"flex",gap:7}}>
-                {shifts[selectedCell.key]&&(
-                  <button onClick={deleteShift} style={{flex:1,border:`1.5px solid var(--destructive)`,background:"#FFF5F5",color:"var(--destructive)",borderRadius:7,padding:"8px",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:600}}>Remove</button>
-                )}
-                <button onClick={saveShift} style={{flex:2,background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"8px",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>
-                  {shifts[selectedCell.key]?"Update Shift":"Add Shift"}
-                </button>
-              </div>
             </div>
           </Backdrop>
         );
