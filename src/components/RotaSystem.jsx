@@ -95,6 +95,7 @@ export default function RotaSystem() {
   const [profileTab,        setProfileTab]        = useState("overview");
   const [editingRowId,      setEditingRowId]      = useState(null);
   const [absencePickerDate, setAbsencePickerDate] = useState(null);
+  const [absenceModal,      setAbsenceModal]      = useState(null); // { staffId, dateKey, code }
   const [absenceViewYear,   setAbsenceViewYear]   = useState(()=>new Date().getFullYear());
   const [absenceViewMonth,  setAbsenceViewMonth]  = useState(()=>new Date().getMonth());
   const profileViewYear = new Date().getFullYear();
@@ -156,12 +157,25 @@ export default function RotaSystem() {
   const staffStats = useMemo(()=>{
     const map={};
     staff.forEach(s=>{
-      let hours=0, wkndShifts=0;
-      allDays.forEach(({weekIdx,dayIdx})=>{
-        const k=`${s.id}-w${weekIdx}-d${dayIdx}`;
-        if(shifts[k]){ hours+=calcHours(shifts[k].start,shifts[k].end,shifts[k].brk); if(isWeekend(dayIdx)) wkndShifts++; }
+      let hours=0, wageHours=0, wkndShifts=0;
+      const dailyHrs=(s.contracted||0)/5;
+      allDays.forEach(({date,weekIdx,dayIdx})=>{
+        const dk=fmtDateKey(date);
+        const absCode=(s.absences||{})[dk];
+        if(absCode){
+          // Absence day: all codes count toward total hours; U (Unpaid) excluded from cost
+          hours+=dailyHrs;
+          if(absCode!=="U") wageHours+=dailyHrs;
+        } else {
+          const k=`${s.id}-w${weekIdx}-d${dayIdx}`;
+          if(shifts[k]){
+            const h=calcHours(shifts[k].start,shifts[k].end,shifts[k].brk);
+            hours+=h; wageHours+=h;
+            if(isWeekend(dayIdx)) wkndShifts++;
+          }
+        }
       });
-      map[s.id]={hours,wkndShifts};
+      map[s.id]={hours,wageHours,wkndShifts};
     });
     return map;
   },[shifts,staff,allDays]);
@@ -172,7 +186,7 @@ export default function RotaSystem() {
   ,[staff,staffStats]);
 
   const totalWageCost = useMemo(()=>
-    Object.values(staffStats).reduce((a,s)=>a+s.hours,0)*WAGE_RATE
+    Object.values(staffStats).reduce((a,s)=>a+s.wageHours,0)*WAGE_RATE
   ,[staffStats]);
 
   // ── existing helpers ─────────────────────────────────────────────────────
@@ -373,7 +387,7 @@ export default function RotaSystem() {
               ["👤","Staff",filteredStaff.length],
               ["📅","Shifts",filteredStaff.reduce((a,s)=>{ let c=0; allDays.forEach(({weekIdx,dayIdx})=>{ if(shifts[`${s.id}-w${weekIdx}-d${dayIdx}`]) c++; }); return a+c; },0)],
               ["⏱","Hours",`${filteredStaff.reduce((a,s)=>a+(staffStats[s.id]?.hours||0),0).toFixed(0)}h`],
-              ["💷","Est. Cost",`£${(filteredStaff.reduce((a,s)=>a+(staffStats[s.id]?.hours||0),0)*WAGE_RATE).toFixed(0)}`],
+              ["💷","Est. Cost",`£${(filteredStaff.reduce((a,s)=>a+(staffStats[s.id]?.wageHours||0),0)*WAGE_RATE).toFixed(0)}`],
             ].map(([icon,lbl,val])=>(
               <div key={lbl} style={{background:"var(--background)",borderRadius:9,padding:"9px 12px",display:"flex",alignItems:"center",gap:8,border:"1px solid var(--border)"}}>
                 <span style={{fontSize:18}}>{icon}</span>
@@ -468,14 +482,25 @@ export default function RotaSystem() {
                         <div style={{fontSize:9,color:"var(--muted-foreground)"}}>{member.role}</div>
                       </div>
                     </div>
-                    {allDays.map(({weekIdx,dayIdx,key})=>{
+                    {allDays.map(({date,weekIdx,dayIdx,key})=>{
+                      const dk=fmtDateKey(date);
+                      const absCode=(member.absences||{})[dk];
+                      const absInfo=absCode?ABSENCE_CODE_MAP[absCode]:null;
                       const sk=`${member.id}-w${weekIdx}-d${dayIdx}`, shift=shifts[sk];
-                      const l=shift?getLoc(shift.locationId):null;
+                      const l=(!absCode&&shift)?getLoc(shift.locationId):null;
                       const wknd=isWeekend(dayIdx);
                       return(
-                        <div key={key} className="cell" onClick={()=>openShiftModal(member.id,weekIdx,dayIdx)}
+                        <div key={key} className="cell"
+                          onClick={()=>absInfo
+                            ? setAbsenceModal({staffId:member.id,dateKey:dk,code:absCode})
+                            : openShiftModal(member.id,weekIdx,dayIdx)}
                           style={{borderLeft:`1px solid ${wknd?"#dce6f0":"#EEF2F7"}`,padding:"2px 2px",minHeight:48,display:"flex",alignItems:"center",justifyContent:"center",background:wknd?(mi%2===0?"#FFF9F0":"#FEF7E8"):"inherit"}}>
-                          {shift?(
+                          {absInfo?(
+                            <div className="chip" style={{background:absInfo.color,border:`1.5px solid ${absInfo.color}`,borderRadius:5,padding:"3px 4px",width:"100%"}}>
+                              <div style={{fontSize:11,fontWeight:700,color:"#fff",textAlign:"center",lineHeight:1.1}}>{absInfo.key}</div>
+                              <div style={{fontSize:8,color:"rgba(255,255,255,.85)",textAlign:"center",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{absInfo.label}</div>
+                            </div>
+                          ):shift?(
                             <div className="chip" style={{background:l.bg,border:`1.5px solid ${l.border}`,borderRadius:5,padding:"3px 3px",width:"100%"}}>
                               <div style={{display:"flex",alignItems:"center",gap:2,marginBottom:1}}>
                                 <div style={{width:5,height:5,borderRadius:"50%",background:l.dot,flexShrink:0}}/>
@@ -1051,6 +1076,48 @@ export default function RotaSystem() {
           </div>
         </div>
       )}
+
+      {/* ===== ABSENCE CHIP MODAL ===== */}
+      {absenceModal&&(()=>{
+        const ac=ABSENCE_CODE_MAP[absenceModal.code];
+        const member=staff.find(s=>s.id===absenceModal.staffId);
+        const [y,m]=absenceModal.dateKey.split("-").map(Number);
+        return(
+          <Backdrop onClose={()=>setAbsenceModal(null)}>
+            <ModalHead title={member?.name} sub={absenceModal.dateKey} onClose={()=>setAbsenceModal(null)}/>
+            <div style={{padding:16}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,background:ac.color+"18",border:`1.5px solid ${ac.color}`,borderRadius:9,padding:"10px 14px",marginBottom:16}}>
+                <div style={{width:32,height:32,borderRadius:6,background:ac.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:700,color:"#fff",flexShrink:0}}>{ac.key}</div>
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:ac.color}}>{ac.label}</div>
+                  <div style={{fontSize:11,color:"var(--muted-foreground)"}}>Absence recorded for this day</div>
+                </div>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <button onClick={()=>{
+                  setAbsenceModal(null);
+                  setActiveTab("staff");
+                  setSelectedStaffId(absenceModal.staffId);
+                  setProfileTab("absences");
+                  setAbsenceViewYear(y);
+                  setAbsenceViewMonth(m-1);
+                }}
+                  style={{width:"100%",background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"9px",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:600,textAlign:"left",paddingLeft:14}}>
+                  ✏ Edit in Absences tab →
+                </button>
+                <button onClick={()=>{
+                  setAbsenceCode(absenceModal.staffId,absenceModal.dateKey,null);
+                  setAbsenceModal(null);
+                  showNotif("Absence cleared");
+                }}
+                  style={{width:"100%",border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:7,padding:"9px",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:600,textAlign:"left",paddingLeft:14}}>
+                  ✕ Clear absence — return cell to normal
+                </button>
+              </div>
+            </div>
+          </Backdrop>
+        );
+      })()}
 
       {/* ===== SHIFT MODAL ===== */}
       {showShiftModal&&selectedCell&&(()=>{
