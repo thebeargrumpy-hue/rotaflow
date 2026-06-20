@@ -76,7 +76,7 @@ export default function RotaSystem() {
   const [showStaffModal, setShowStaffModal] = useState(false);
   const [showSendModal,  setShowSendModal]  = useState(false);
   const [shiftEdit,      setShiftEdit]      = useState({ start:"09:00", end:"17:00", typeIdx:0, locationId:"restaurant", brk:30 });
-  const [newStaff,       setNewStaff]       = useState({ name:"", role:ROLES[0], contracted:37.5, email:"" });
+  const [newStaff,       setNewStaff]       = useState({ name:"", role:ROLES[0], contracted:37.5, email:"", department:"foh" });
   const [filterRole,     setFilterRole]     = useState("All");
   const [publishedWeeks, setPublishedWeeks] = useState(()=>{
     try { const s=localStorage.getItem("rotaflow-publishedWeeks"); return s?new Set(JSON.parse(s)):new Set(); }
@@ -135,8 +135,8 @@ export default function RotaSystem() {
 
   const allDays = useMemo(()=>
     weekStarts.flatMap((ws,wi)=>
-      Array.from({length:7},(_,di)=>({ date:addDays(ws,di), weekIdx:wi, dayIdx:di, key:`w${wi}d${di}` }))
-    ),[weekStarts]);
+      Array.from({length:7},(_,di)=>({ date:addDays(ws,di), weekIdx:weekOffset+wi, dayIdx:di, key:`w${weekOffset+wi}d${di}` }))
+    ),[weekStarts,weekOffset]);
 
   const periodLabel = useMemo(()=>{
     const f=weekStarts[0], l=addDays(weekStarts[weekStarts.length-1],6);
@@ -210,9 +210,9 @@ export default function RotaSystem() {
     setStaff(p=>[...p,{
       id, name:newStaff.name, role:newStaff.role, email:newStaff.email, avatar:initials,
       contracted, color:STAFF_COLORS[p.length%STAFF_COLORS.length], weekendsWorked:0,
-      annualHolidayDays:28, annualisedHours:contracted*52, absences:{}, department:"foh",
+      annualHolidayDays:28, annualisedHours:contracted*52, absences:{}, department:newStaff.department||"foh",
     }]);
-    setNewStaff({name:"",role:ROLES[0],contracted:37.5,email:""});
+    setNewStaff({name:"",role:ROLES[0],contracted:37.5,email:"",department:"foh"});
     setShowStaffModal(false); showNotif("Staff member added ✓");
   }
 
@@ -651,7 +651,7 @@ export default function RotaSystem() {
                 {profileTab==="overview"&&(
                   <>
                     {/* Editable fields */}
-                    <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,marginBottom:14,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+                    <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,marginBottom:14,display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:12}}>
                       <div>
                         <label style={FL}>Contracted hrs/wk</label>
                         <input type="number" value={member.contracted??""} onChange={e=>updateStaffField(member.id,{contracted:Number(e.target.value)||0})} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
@@ -669,6 +669,13 @@ export default function RotaSystem() {
                             reset
                           </button>
                         </div>
+                      </div>
+                      <div>
+                        <label style={FL}>Department</label>
+                        <select value={member.department||"foh"} onChange={e=>updateStaffField(member.id,{department:e.target.value})} style={IS}>
+                          <option value="foh">Front of House</option>
+                          <option value="kitchen">Kitchen</option>
+                        </select>
                       </div>
                     </div>
 
@@ -855,8 +862,8 @@ export default function RotaSystem() {
           <h3 style={{fontSize:14,fontWeight:700,margin:"0 0 10px"}}>Weekend Coverage — {periodLabel}</h3>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
             {weekStarts.map((ws,wi)=>{
-              const satStaff=staff.filter(s=>shifts[`${s.id}-w${wi}-d5`]);
-              const sunStaff=staff.filter(s=>shifts[`${s.id}-w${wi}-d6`]);
+              const satStaff=staff.filter(s=>shifts[`${s.id}-w${weekOffset+wi}-d5`]);
+              const sunStaff=staff.filter(s=>shifts[`${s.id}-w${weekOffset+wi}-d6`]);
               return(
                 <div key={wi} style={{background:"var(--background)",borderRadius:10,padding:13,border:"1px solid var(--border)"}}>
                   <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>Week {wi+1} · {fmtDate(ws,{day:"numeric",month:"short"})}</div>
@@ -1125,10 +1132,17 @@ export default function RotaSystem() {
                 <input type={type} placeholder={ph} value={newStaff[field]} onChange={e=>setNewStaff(p=>({...p,[field]:e.target.value}))} style={{...IS,width:"100%",boxSizing:"border-box"}}/>
               </div>
             ))}
-            <div style={{marginBottom:14}}>
+            <div style={{marginBottom:11}}>
               <label style={FL}>Role</label>
               <select value={newStaff.role} onChange={e=>setNewStaff(p=>({...p,role:e.target.value}))} style={IS}>
                 {ROLES.map(r=><option key={r}>{r}</option>)}
+              </select>
+            </div>
+            <div style={{marginBottom:14}}>
+              <label style={FL}>Department</label>
+              <select value={newStaff.department} onChange={e=>setNewStaff(p=>({...p,department:e.target.value}))} style={IS}>
+                <option value="foh">Front of House</option>
+                <option value="kitchen">Kitchen</option>
               </select>
             </div>
             <button onClick={addStaff} style={{width:"100%",background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"10px",fontSize:13,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>Add Staff Member</button>
