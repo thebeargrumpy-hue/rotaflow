@@ -16,6 +16,7 @@ const ABSENCE_CODES = [
   { key:"C", label:"Compassionate",       color:"#3b82f6" },
   { key:"L", label:"Time off in Lieu",    color:"#0ea5e9" },
   { key:"W", label:"Work from Home",      color:"#14b8a6" },
+  { key:"R", label:"Rest Day",            color:"#f97316" },
 ];
 const ABSENCE_CODE_MAP = Object.fromEntries(ABSENCE_CODES.map(c=>[c.key,c]));
 
@@ -103,6 +104,7 @@ export default function RotaSystem() {
     return {};
   });
   const [editingDividerId,  setEditingDividerId]  = useState(null);
+  const [overHoursWarning,  setOverHoursWarning]  = useState(null); // { overBy: number }
   const [absenceViewYear,   setAbsenceViewYear]   = useState(()=>new Date().getFullYear());
   const [absenceViewMonth,  setAbsenceViewMonth]  = useState(()=>new Date().getMonth());
   const profileViewYear = new Date().getFullYear();
@@ -171,8 +173,8 @@ export default function RotaSystem() {
         const dk=fmtDateKey(date);
         const absCode=(s.absences||{})[dk];
         if(absCode){
-          // U (Unpaid) counts as 0 for both hours and cost; all other absence codes are paid hours
-          if(absCode!=="U"){ hours+=dailyHrs; wageHours+=dailyHrs; }
+          // U (Unpaid) and R (Rest Day) count as 0 for both hours and cost
+          if(absCode!=="U"&&absCode!=="R"){ hours+=dailyHrs; wageHours+=dailyHrs; }
         } else {
           const k=`${s.id}-w${weekIdx}-d${dayIdx}`;
           if(shifts[k]){
@@ -207,10 +209,25 @@ export default function RotaSystem() {
     setShiftEdit(shifts[key]||{start:"09:00",end:"17:00",typeIdx:0,locationId:"restaurant",brk:30});
     setShiftModalTab("shift");
     setAbsencePickerCode("H");
+    setOverHoursWarning(null);
     setShowShiftModal(true);
   }
 
   function saveShift(){
+    if(!overHoursWarning){
+      const member=staff.find(s=>s.id===selectedCell.staffId);
+      const newHrs=calcHours(shiftEdit.start,shiftEdit.end,shiftEdit.brk);
+      const oldHrs=shifts[selectedCell.key]
+        ?calcHours(shifts[selectedCell.key].start,shifts[selectedCell.key].end,shifts[selectedCell.key].brk):0;
+      const currentHrs=(staffStats[selectedCell.staffId]||{hours:0}).hours;
+      const newTotal=currentHrs-oldHrs+newHrs;
+      const target=(member?.contracted||0)*numWeeks;
+      if(newTotal>target){
+        setOverHoursWarning({overBy:newTotal-target,name:member?.name});
+        return;
+      }
+    }
+    setOverHoursWarning(null);
     const wasEmpty=!shifts[selectedCell.key];
     setShifts(p=>({...p,[selectedCell.key]:{...shiftEdit}}));
     if(wasEmpty&&isWeekend(selectedCell.dayIdx))
@@ -549,9 +566,9 @@ export default function RotaSystem() {
                   if(row.type==="divider"){
                     const {div}=row;
                     return(
-                      <div key={div.id} style={{display:"grid",gridTemplateColumns:`190px repeat(${allDays.length},1fr) 66px`,borderTop:"1px solid var(--border)",background:"hsl(220 25% 95%)"}}>
-                        <div style={{padding:"3px 8px",display:"flex",alignItems:"center",gap:4,borderRight:"1px solid var(--border)"}}>
-                          <span style={{fontSize:9,color:"var(--muted-foreground)",opacity:.5,flexShrink:0}}>§</span>
+                      <div key={div.id} style={{display:"grid",gridTemplateColumns:`190px repeat(${allDays.length},1fr) 66px`,borderTop:"1px solid var(--border)",background:"#111"}}>
+                        <div style={{padding:"3px 8px",display:"flex",alignItems:"center",gap:4,borderRight:"1px solid rgba(255,255,255,.12)"}}>
+                          <span style={{fontSize:9,color:"rgba(255,255,255,.5)",opacity:.5,flexShrink:0}}>§</span>
                           {editingDividerId===div.id?(
                             <input autoFocus value={div.label}
                               onChange={e=>renameDivider(activeDept,div.id,e.target.value)}
@@ -560,26 +577,26 @@ export default function RotaSystem() {
                               style={{...IS,fontSize:10,padding:"1px 4px",height:20,flex:1}}/>
                           ):(
                             <button onClick={()=>setEditingDividerId(div.id)}
-                              style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,fontWeight:700,color:"var(--muted-foreground)",display:"flex",alignItems:"center",gap:3,padding:0,flex:1,minWidth:0,textAlign:"left"}}>
+                              style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:10,fontWeight:700,color:"rgba(255,255,255,.8)",display:"flex",alignItems:"center",gap:3,padding:0,flex:1,minWidth:0,textAlign:"left"}}>
                               <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{div.label}</span>
                               <span style={{fontSize:8,opacity:.35}}>✎</span>
                             </button>
                           )}
                           <button onClick={()=>moveDivider(activeDept,div.id,"up",filteredStaff)} title="Move up"
-                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"var(--muted-foreground)",opacity:.4,padding:"0 1px",flexShrink:0}}
+                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"#fff",opacity:.4,padding:"0 1px",flexShrink:0}}
                             onMouseEnter={e=>e.currentTarget.style.opacity=1}
                             onMouseLeave={e=>e.currentTarget.style.opacity=.4}>↑</button>
                           <button onClick={()=>moveDivider(activeDept,div.id,"down",filteredStaff)} title="Move down"
-                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"var(--muted-foreground)",opacity:.4,padding:"0 1px",flexShrink:0}}
+                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"#fff",opacity:.4,padding:"0 1px",flexShrink:0}}
                             onMouseEnter={e=>e.currentTarget.style.opacity=1}
                             onMouseLeave={e=>e.currentTarget.style.opacity=.4}>↓</button>
                           <button onClick={()=>deleteDivider(activeDept,div.id)} title="Delete divider"
-                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"var(--muted-foreground)",opacity:.4,padding:"0 1px",flexShrink:0}}
+                            style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:"#fff",opacity:.4,padding:"0 1px",flexShrink:0}}
                             onMouseEnter={e=>e.currentTarget.style.opacity=1}
                             onMouseLeave={e=>e.currentTarget.style.opacity=.4}>✕</button>
                         </div>
-                        <div style={{gridColumn:`2 / span ${allDays.length+1}`,borderLeft:"1px solid var(--border)",display:"flex",alignItems:"center",padding:"0 8px"}}>
-                          <div style={{flex:1,height:1,background:"var(--border)",opacity:.5}}/>
+                        <div style={{gridColumn:`2 / span ${allDays.length+1}`,borderLeft:"1px solid rgba(255,255,255,.12)",display:"flex",alignItems:"center",padding:"0 8px"}}>
+                          <div style={{flex:1,height:1,background:"rgba(255,255,255,.2)"}}/>
                         </div>
                       </div>
                     );
@@ -639,6 +656,9 @@ export default function RotaSystem() {
                       <div style={{borderLeft:"1px solid var(--border)",padding:"4px 3px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
                         <div style={{fontSize:12,fontWeight:700,color:over?"var(--destructive)":"var(--foreground)"}}>{stats.hours.toFixed(1)}</div>
                         <div style={{fontSize:8,color:"var(--muted-foreground)"}}>{target}h</div>
+                        <div style={{fontSize:8,fontWeight:700,color:over?"#16a34a":"var(--destructive)",lineHeight:1.2}}>
+                          {over?`+${(stats.hours-target).toFixed(1)}`:`−${(target-stats.hours).toFixed(1)}`}
+                        </div>
                         <div style={{width:28,height:3,background:"var(--secondary)",borderRadius:2,marginTop:2}}>
                           <div style={{width:`${Math.min(100,(stats.hours/target)*100)}%`,height:"100%",background:over?"var(--destructive)":"var(--primary)",borderRadius:2}}/>
                         </div>
@@ -1253,7 +1273,7 @@ export default function RotaSystem() {
               {/* Shift / Absence toggle */}
               <div style={{display:"flex",gap:2,background:"var(--secondary)",borderRadius:8,padding:3,marginBottom:14}}>
                 {[["shift","Shift"],["absence","Absence"]].map(([k,label])=>(
-                  <button key={k} onClick={()=>setShiftModalTab(k)}
+                  <button key={k} onClick={()=>{setShiftModalTab(k);setOverHoursWarning(null);}}
                     style={{flex:1,border:"none",padding:"5px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",background:shiftModalTab===k?"var(--background)":"transparent",color:shiftModalTab===k?"var(--foreground)":"var(--muted-foreground)",boxShadow:shiftModalTab===k?"0 1px 3px rgba(0,0,0,.08)":"none",transition:"all .15s"}}>
                     {label}
                   </button>
@@ -1318,6 +1338,23 @@ export default function RotaSystem() {
                       {shifts[selectedCell.key]?"Update Shift":"Add Shift"}
                     </button>
                   </div>
+                  {overHoursWarning&&(
+                    <div style={{background:"#FFF3CD",border:"1px solid var(--warning)",borderRadius:7,padding:"9px 11px",marginTop:9}}>
+                      <div style={{fontSize:11,fontWeight:700,color:"#92400e",marginBottom:7}}>
+                        ⚠ This puts {overHoursWarning.name} {overHoursWarning.overBy.toFixed(1)}h over contracted hours for this period.
+                      </div>
+                      <div style={{display:"flex",gap:7}}>
+                        <button onClick={()=>setOverHoursWarning(null)}
+                          style={{flex:1,border:"1.5px solid var(--border)",background:"var(--background)",borderRadius:7,padding:"6px",fontSize:11,fontFamily:"inherit",cursor:"pointer",fontWeight:600}}>
+                          Cancel
+                        </button>
+                        <button onClick={saveShift}
+                          style={{flex:1,background:"#d97706",color:"#fff",border:"none",borderRadius:7,padding:"6px",fontSize:11,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>
+                          Save Anyway
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </>
               ):(
                 <>
