@@ -20,6 +20,11 @@ const ABSENCE_CODES = [
 ];
 const ABSENCE_CODE_MAP = Object.fromEntries(ABSENCE_CODES.map(c=>[c.key,c]));
 
+const DEFAULT_DEPARTMENTS = [
+  { id:"foh",     label:"Front of House" },
+  { id:"kitchen", label:"Kitchen"        },
+];
+
 const DEFAULT_DAILY_INFO_ROWS = [
   { id:"vouchers",  label:"Vouchers"         },
   { id:"tmts",      label:"TMT's"            },
@@ -91,7 +96,10 @@ export default function RotaSystem() {
   const [stDraft,        setStDraft]        = useState(loadShiftTypes);
 
   // ── new state ────────────────────────────────────────────────────────────
-  const [activeDept,        setActiveDept]        = useState("foh");
+  const [activeDept,        setActiveDept]        = useState(()=>{
+    try{ const s=localStorage.getItem("rotaflow_departments"); if(s){ const d=JSON.parse(s); return d[0]?.id||"foh"; } }catch{}
+    return "foh";
+  });
   const [selectedStaffId,   setSelectedStaffId]   = useState(null);
   const [profileTab,        setProfileTab]        = useState("overview");
   const [editingRowId,      setEditingRowId]      = useState(null);
@@ -105,6 +113,11 @@ export default function RotaSystem() {
   });
   const [editingDividerId,  setEditingDividerId]  = useState(null);
   const [overHoursWarning,  setOverHoursWarning]  = useState(null); // { overBy: number }
+  const [departments,       setDepartments]       = useState(()=>{
+    try{ const s=localStorage.getItem("rotaflow_departments"); if(s) return JSON.parse(s); }catch{}
+    return DEFAULT_DEPARTMENTS;
+  });
+  const [deptDeleteError,   setDeptDeleteError]   = useState(null); // dept id that can't be deleted
   const [absenceViewYear,   setAbsenceViewYear]   = useState(()=>new Date().getFullYear());
   const [absenceViewMonth,  setAbsenceViewMonth]  = useState(()=>new Date().getMonth());
   const profileViewYear = new Date().getFullYear();
@@ -133,7 +146,8 @@ export default function RotaSystem() {
   useEffect(()=>{
     localStorage.setItem("rotaflow_daily_info", JSON.stringify({ rows:dailyInfoRows, values:dailyInfoValues }));
   },[dailyInfoRows,dailyInfoValues]);
-  useEffect(()=>{ localStorage.setItem("rotaflow_dividers", JSON.stringify(staffDividers)); },[staffDividers]);
+  useEffect(()=>{ localStorage.setItem("rotaflow_dividers",    JSON.stringify(staffDividers)); },[staffDividers]);
+  useEffect(()=>{ localStorage.setItem("rotaflow_departments", JSON.stringify(departments));  },[departments]);
 
   // ── derived values ───────────────────────────────────────────────────────
   const numWeeks = parseInt(viewWeeks);
@@ -161,7 +175,7 @@ export default function RotaSystem() {
   ),[allDays]);
 
   const filteredStaff = staff
-    .filter(s=>(s.department||"foh")===activeDept)
+    .filter(s=>s.department===activeDept)
     .filter(s=>filterRole==="All"||s.role===filterRole);
 
   const staffStats = useMemo(()=>{
@@ -250,9 +264,9 @@ export default function RotaSystem() {
     setStaff(p=>[...p,{
       id, name:newStaff.name, role:newStaff.role, email:newStaff.email, avatar:initials,
       contracted, color:STAFF_COLORS[p.length%STAFF_COLORS.length], weekendsWorked:0,
-      annualHolidayDays:28, annualisedHours:contracted*52, absences:{}, department:newStaff.department||"foh",
+      annualHolidayDays:28, annualisedHours:contracted*52, absences:{}, department:newStaff.department||departments[0]?.id||"foh",
     }]);
-    setNewStaff({name:"",role:ROLES[0],contracted:37.5,email:"",department:"foh"});
+    setNewStaff({name:"",role:ROLES[0],contracted:37.5,email:"",department:departments[0]?.id||"foh"});
     setShowStaffModal(false); showNotif("Staff member added ✓");
   }
 
@@ -287,6 +301,35 @@ export default function RotaSystem() {
     const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
     const toH=n=>Math.max(0,Math.min(255,Math.round(n))).toString(16).padStart(2,"0");
     return {border:hex,bg:`#${toH(r*.1+255*.9)}${toH(g*.1+255*.9)}${toH(b*.1+255*.9)}`,text:`#${toH(r*.55)}${toH(g*.55)}${toH(b*.55)}`};
+  }
+
+  function addDept(){
+    const id="dept_"+Date.now();
+    setDepartments(p=>[...p,{id,label:"New Department"}]);
+  }
+
+  function renameDept(id,label){
+    setDepartments(p=>p.map(d=>d.id===id?{...d,label}:d));
+  }
+
+  function deleteDept(id){
+    if(staff.some(s=>s.department===id)){ setDeptDeleteError(id); return; }
+    setDeptDeleteError(null);
+    setDepartments(p=>{
+      const next=p.filter(d=>d.id!==id);
+      if(activeDept===id) setActiveDept(next[0]?.id||"");
+      return next;
+    });
+    setStaffDividers(p=>{ const n={...p}; delete n[id]; return n; });
+  }
+
+  function moveDept(idx,dir){
+    setDepartments(p=>{
+      const next=[...p], target=idx+dir;
+      if(target<0||target>=next.length) return p;
+      [next[idx],next[target]]=[next[target],next[idx]];
+      return next;
+    });
   }
 
   function saveSettings(){ setLocations([...locDraft]); setShiftTypes([...stDraft]); showNotif("Settings saved ✓"); }
@@ -444,10 +487,10 @@ export default function RotaSystem() {
 
           {/* Department switcher */}
           <div style={{display:"flex",gap:3,marginBottom:10,background:"hsl(220 25% 96%)",borderRadius:8,padding:3,width:"fit-content"}}>
-            {[["foh","Front of House"],["kitchen","Kitchen"]].map(([id,label])=>(
-              <button key={id} onClick={()=>setActiveDept(id)}
-                style={{padding:"5px 14px",borderRadius:6,border:"none",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",background:activeDept===id?"var(--background)":"transparent",color:activeDept===id?"var(--foreground)":"var(--muted-foreground)",boxShadow:activeDept===id?"0 1px 3px rgba(0,0,0,.08)":"none",transition:"all .15s"}}>
-                {label}
+            {departments.map(dept=>(
+              <button key={dept.id} onClick={()=>setActiveDept(dept.id)}
+                style={{padding:"5px 14px",borderRadius:6,border:"none",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",background:activeDept===dept.id?"var(--background)":"transparent",color:activeDept===dept.id?"var(--foreground)":"var(--muted-foreground)",boxShadow:activeDept===dept.id?"0 1px 3px rgba(0,0,0,.08)":"none",transition:"all .15s"}}>
+                {dept.label}
               </button>
             ))}
           </div>
@@ -541,7 +584,7 @@ export default function RotaSystem() {
                     + Add row
                   </button>
                   <span style={{marginLeft:"auto",fontSize:10,fontWeight:700,color:"var(--muted-foreground)",textTransform:"uppercase",letterSpacing:".05em",paddingRight:8}}>
-                    {activeDept==="foh"?"Front of House":"Kitchen"} — Staff Schedule
+                    {departments.find(d=>d.id===activeDept)?.label||activeDept} — Staff Schedule
                   </span>
                 </div>
               </div>
@@ -839,9 +882,8 @@ export default function RotaSystem() {
                       </div>
                       <div>
                         <label style={FL}>Department</label>
-                        <select value={member.department||"foh"} onChange={e=>updateStaffField(member.id,{department:e.target.value})} style={IS}>
-                          <option value="foh">Front of House</option>
-                          <option value="kitchen">Kitchen</option>
+                        <select value={member.department||departments[0]?.id||""} onChange={e=>updateStaffField(member.id,{department:e.target.value})} style={IS}>
+                          {departments.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
                         </select>
                       </div>
                     </div>
@@ -1132,7 +1174,39 @@ export default function RotaSystem() {
       {activeTab==="settings"&&(
         <div style={{padding:"14px 18px 90px"}}>
           <h2 style={{margin:"0 0 4px",fontSize:17,fontWeight:700}}>Settings</h2>
-          <p style={{margin:"0 0 20px",fontSize:12,color:"var(--muted-foreground)"}}>Customise locations and shift types. Changes apply after saving.</p>
+          <p style={{margin:"0 0 20px",fontSize:12,color:"var(--muted-foreground)"}}>Customise departments, locations, and shift types. Location and shift type changes apply after saving.</p>
+
+          {/* Departments */}
+          <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Departments</h3>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12,marginBottom:8}}>
+            {departments.map((dept,i)=>(
+              <div key={dept.id} style={{background:"#fff",border:"1px solid #E8EFF5",borderRadius:10,padding:14}}>
+                <div style={{marginBottom:10}}>
+                  <label style={FL}>Name</label>
+                  <input value={dept.label} onChange={e=>renameDept(dept.id,e.target.value)} style={{...IS,fontSize:11}}/>
+                </div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <button onClick={()=>moveDept(i,-1)} disabled={i===0}
+                    style={{border:"1px solid var(--border)",background:"var(--secondary)",borderRadius:5,padding:"3px 7px",fontSize:11,cursor:i===0?"default":"pointer",opacity:i===0?.35:1,fontFamily:"inherit"}}>↑</button>
+                  <button onClick={()=>moveDept(i,1)} disabled={i===departments.length-1}
+                    style={{border:"1px solid var(--border)",background:"var(--secondary)",borderRadius:5,padding:"3px 7px",fontSize:11,cursor:i===departments.length-1?"default":"pointer",opacity:i===departments.length-1?.35:1,fontFamily:"inherit"}}>↓</button>
+                  <button onClick={()=>deleteDept(dept.id)}
+                    style={{marginLeft:"auto",border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:5,padding:"3px 9px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                    Delete
+                  </button>
+                </div>
+                {deptDeleteError===dept.id&&(
+                  <div style={{marginTop:8,fontSize:11,color:"var(--destructive)",lineHeight:1.4}}>
+                    Reassign all staff from this department before deleting.
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <button onClick={addDept}
+            style={{marginBottom:28,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
+            + Add Department
+          </button>
 
           {/* Locations */}
           <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Locations</h3>
@@ -1406,9 +1480,8 @@ export default function RotaSystem() {
             </div>
             <div style={{marginBottom:14}}>
               <label style={FL}>Department</label>
-              <select value={newStaff.department} onChange={e=>setNewStaff(p=>({...p,department:e.target.value}))} style={IS}>
-                <option value="foh">Front of House</option>
-                <option value="kitchen">Kitchen</option>
+              <select value={newStaff.department||departments[0]?.id||""} onChange={e=>setNewStaff(p=>({...p,department:e.target.value}))} style={IS}>
+                {departments.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
               </select>
             </div>
             <button onClick={addStaff} style={{width:"100%",background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"10px",fontSize:13,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>Add Staff Member</button>
