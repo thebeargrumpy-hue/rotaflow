@@ -42,6 +42,16 @@ const MONTH_NAMES = [
 const CASUAL_BUDGET_KEYS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
 const DEFAULT_CASUAL_BUDGET = Object.fromEntries(CASUAL_BUDGET_KEYS.map(k=>[k,0]));
 
+const JOB_TITLES_KEY = "rotaflow_job_titles";
+const DEFAULT_JOB_TITLES = [
+  { id:"jt_supervisor",     label:"Supervisor"     },
+  { id:"jt_waiter",         label:"Waiter"         },
+  { id:"jt_bar_staff",      label:"Bar Staff"      },
+  { id:"jt_head_chef",      label:"Head Chef"      },
+  { id:"jt_sous_chef",      label:"Sous Chef"      },
+  { id:"jt_kitchen_porter", label:"Kitchen Porter" },
+];
+
 function fmtDateKey(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
@@ -86,7 +96,10 @@ export default function RotaSystem() {
   const [showStaffModal, setShowStaffModal] = useState(false);
   const [showSendModal,  setShowSendModal]  = useState(false);
   const [shiftEdit,      setShiftEdit]      = useState({ start:"09:00", end:"17:00", typeIdx:0, locationId:"restaurant", brk:30 });
-  const [newStaff,       setNewStaff]       = useState({ name:"", role:ROLES[0], contracted:37.5, email:"", department:"foh" });
+  const [newStaff,       setNewStaff]       = useState(()=>{
+    try{ const s=localStorage.getItem(JOB_TITLES_KEY); if(s){ const ts=JSON.parse(s); if(ts.length) return {name:"",role:ts[0].label,contracted:37.5,email:"",department:"foh"}; } }catch{}
+    return {name:"",role:DEFAULT_JOB_TITLES[0].label,contracted:37.5,email:"",department:"foh"};
+  });
   const [filterRole,     setFilterRole]     = useState("All");
   const [publishedWeeks, setPublishedWeeks] = useState(()=>{
     try { const s=localStorage.getItem("rotaflow-publishedWeeks"); return s?new Set(JSON.parse(s)):new Set(); }
@@ -105,6 +118,14 @@ export default function RotaSystem() {
   const [casualBudgetDraft, setCasualBudgetDraft] = useState(()=>{
     try{ const s=localStorage.getItem("rotaflow_casual_budget"); if(s) return {...DEFAULT_CASUAL_BUDGET,...JSON.parse(s)}; }catch{}
     return {...DEFAULT_CASUAL_BUDGET};
+  });
+  const [jobTitles,      setJobTitles]      = useState(()=>{
+    try{ const s=localStorage.getItem(JOB_TITLES_KEY); if(s) return JSON.parse(s); }catch{}
+    return DEFAULT_JOB_TITLES.map(t=>({...t}));
+  });
+  const [jobTitlesDraft, setJobTitlesDraft] = useState(()=>{
+    try{ const s=localStorage.getItem(JOB_TITLES_KEY); if(s) return JSON.parse(s); }catch{}
+    return DEFAULT_JOB_TITLES.map(t=>({...t}));
   });
 
   // ── new state ────────────────────────────────────────────────────────────
@@ -163,6 +184,7 @@ export default function RotaSystem() {
   useEffect(()=>{ localStorage.setItem("rotaflow_dividers",       JSON.stringify(staffDividers)); },[staffDividers]);
   useEffect(()=>{ localStorage.setItem("rotaflow_departments",    JSON.stringify(departments));  },[departments]);
   useEffect(()=>{ localStorage.setItem("rotaflow_casual_budget",  JSON.stringify(casualBudget)); },[casualBudget]);
+  useEffect(()=>{ localStorage.setItem(JOB_TITLES_KEY, JSON.stringify(jobTitles)); },[jobTitles]);
 
   // ── derived values ───────────────────────────────────────────────────────
   const numWeeks = parseInt(viewWeeks);
@@ -327,7 +349,7 @@ export default function RotaSystem() {
       contracted, color:STAFF_COLORS[p.length%STAFF_COLORS.length], weekendsWorked:0,
       annualHolidayDays:28, annualisedHours:contracted*52, absences:{}, department:newStaff.department||departments[0]?.id||"foh",
     }]);
-    setNewStaff({name:"",role:ROLES[0],contracted:37.5,email:"",department:departments[0]?.id||"foh"});
+    setNewStaff({name:"",role:jobTitles[0]?.label||"",contracted:37.5,email:"",department:departments[0]?.id||"foh"});
     setShowStaffModal(false); showNotif("Staff member added ✓");
   }
 
@@ -393,7 +415,7 @@ export default function RotaSystem() {
     });
   }
 
-  function saveSettings(){ setLocations([...locDraft]); setShiftTypes([...stDraft]); setCasualBudget({...casualBudgetDraft}); showNotif("Settings saved ✓"); }
+  function saveSettings(){ setLocations([...locDraft]); setShiftTypes([...stDraft]); setCasualBudget({...casualBudgetDraft}); setJobTitles([...jobTitlesDraft]); showNotif("Settings saved ✓"); }
 
   function addLocation(){
     const id="loc_"+Date.now();
@@ -405,6 +427,11 @@ export default function RotaSystem() {
     const idx=stDraft.reduce((m,t)=>Math.max(m,t.idx),0)+1;
     const d=deriveSTColors("#6b7280");
     setStDraft(p=>[...p,{idx,label:"New Shift Type",...d}]);
+  }
+
+  function addJobTitle(){
+    const id="jt_"+Date.now();
+    setJobTitlesDraft(p=>[...p,{id,label:""}]);
   }
 
   // ── new helpers ──────────────────────────────────────────────────────────
@@ -1485,6 +1512,31 @@ export default function RotaSystem() {
             + Add Shift Type
           </button>
 
+          {/* Job Titles */}
+          <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 4px"}}>Job titles</h3>
+          <p style={{margin:"0 0 10px",fontSize:12,color:"var(--muted-foreground)"}}>Define the job titles available across your organisation.</p>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12,marginBottom:8}}>
+            {jobTitlesDraft.map((jt,i)=>(
+              <div key={jt.id} style={{background:"#fff",border:"1px solid #E8EFF5",borderRadius:10,padding:14}}>
+                <div style={{marginBottom:10}}>
+                  <label style={FL}>Title</label>
+                  <input value={jt.label} onChange={e=>setJobTitlesDraft(p=>p.map((t,j)=>j===i?{...t,label:e.target.value}:t))}
+                    style={{...IS,fontSize:11}} placeholder="e.g. Head Chef"/>
+                </div>
+                <div style={{display:"flex",justifyContent:"flex-end"}}>
+                  <button onClick={()=>setJobTitlesDraft(p=>p.filter((_,j)=>j!==i))}
+                    style={{border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:5,padding:"3px 9px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <button onClick={addJobTitle}
+            style={{marginBottom:28,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
+            + Add job title
+          </button>
+
           {/* Casual Budget */}
           <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Casual Budget (hours per month)</h3>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:12,marginBottom:28}}>
@@ -1705,7 +1757,7 @@ export default function RotaSystem() {
             <div style={{marginBottom:11}}>
               <label style={FL}>Role</label>
               <select value={newStaff.role} onChange={e=>setNewStaff(p=>({...p,role:e.target.value}))} style={IS}>
-                {ROLES.map(r=><option key={r}>{r}</option>)}
+                {jobTitles.map(jt=><option key={jt.id} value={jt.label}>{jt.label}</option>)}
               </select>
             </div>
             <div style={{marginBottom:14}}>
