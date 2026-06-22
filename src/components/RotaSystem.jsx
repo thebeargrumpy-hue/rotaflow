@@ -39,6 +39,9 @@ const MONTH_NAMES = [
   "July","August","September","October","November","December",
 ];
 
+const CASUAL_BUDGET_KEYS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+const DEFAULT_CASUAL_BUDGET = Object.fromEntries(CASUAL_BUDGET_KEYS.map(k=>[k,0]));
+
 function fmtDateKey(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
@@ -57,6 +60,7 @@ function migrateStaff(arr) {
     annualisedHours:   (s.contracted||40)*52,
     absences:          {},
     department:        "foh",
+    contractType:      "full_time",
     ...s,
   }));
 }
@@ -94,6 +98,14 @@ export default function RotaSystem() {
   const [shiftTypes,     setShiftTypes]     = useState(loadShiftTypes);
   const [locDraft,       setLocDraft]       = useState(loadLocations);
   const [stDraft,        setStDraft]        = useState(loadShiftTypes);
+  const [casualBudget,      setCasualBudget]      = useState(()=>{
+    try{ const s=localStorage.getItem("rotaflow_casual_budget"); if(s) return {...DEFAULT_CASUAL_BUDGET,...JSON.parse(s)}; }catch{}
+    return {...DEFAULT_CASUAL_BUDGET};
+  });
+  const [casualBudgetDraft, setCasualBudgetDraft] = useState(()=>{
+    try{ const s=localStorage.getItem("rotaflow_casual_budget"); if(s) return {...DEFAULT_CASUAL_BUDGET,...JSON.parse(s)}; }catch{}
+    return {...DEFAULT_CASUAL_BUDGET};
+  });
 
   // ── new state ────────────────────────────────────────────────────────────
   const [activeDept,        setActiveDept]        = useState(()=>{
@@ -113,6 +125,7 @@ export default function RotaSystem() {
   });
   const [editingDividerId,  setEditingDividerId]  = useState(null);
   const [overHoursWarning,  setOverHoursWarning]  = useState(null); // { overBy: number }
+  const [casualBudgetWarning, setCasualBudgetWarning] = useState(null); // { overBy: number }
   const [departments,       setDepartments]       = useState(()=>{
     try{ const s=localStorage.getItem("rotaflow_departments"); if(s) return JSON.parse(s); }catch{}
     return DEFAULT_DEPARTMENTS;
@@ -147,8 +160,9 @@ export default function RotaSystem() {
   useEffect(()=>{
     localStorage.setItem("rotaflow_daily_info", JSON.stringify({ rows:dailyInfoRows, values:dailyInfoValues }));
   },[dailyInfoRows,dailyInfoValues]);
-  useEffect(()=>{ localStorage.setItem("rotaflow_dividers",    JSON.stringify(staffDividers)); },[staffDividers]);
-  useEffect(()=>{ localStorage.setItem("rotaflow_departments", JSON.stringify(departments));  },[departments]);
+  useEffect(()=>{ localStorage.setItem("rotaflow_dividers",       JSON.stringify(staffDividers)); },[staffDividers]);
+  useEffect(()=>{ localStorage.setItem("rotaflow_departments",    JSON.stringify(departments));  },[departments]);
+  useEffect(()=>{ localStorage.setItem("rotaflow_casual_budget",  JSON.stringify(casualBudget)); },[casualBudget]);
 
   // ── derived values ───────────────────────────────────────────────────────
   const numWeeks = parseInt(viewWeeks);
@@ -213,6 +227,22 @@ export default function RotaSystem() {
     Object.values(staffStats).reduce((a,s)=>a+s.wageHours,0)*WAGE_RATE
   ,[staffStats]);
 
+  const baseMonday = useMemo(()=>getMondayOf(new Date()),[]);
+
+  const casualMonthlyHours = useMemo(()=>{
+    const thisYear=new Date().getFullYear();
+    const zeroIds=new Set(staff.filter(s=>(s.contractType||"full_time")==="zero_hours").map(s=>String(s.id)));
+    const totals=Array(12).fill(0);
+    Object.entries(shifts).forEach(([key,shift])=>{
+      const m=key.match(/^(.+)-w(-?\d+)-d(\d+)$/);
+      if(!m||!zeroIds.has(m[1])) return;
+      const date=addDays(baseMonday,parseInt(m[2])*7+parseInt(m[3]));
+      if(date.getFullYear()!==thisYear) return;
+      totals[date.getMonth()]+=calcHours(shift.start,shift.end,shift.brk);
+    });
+    return totals;
+  },[shifts,staff,baseMonday]);
+
   // ── existing helpers ─────────────────────────────────────────────────────
   const getLoc   = id  => locations.find(l=>l.id===id)||locations[0];
   const getStype = idx => shiftTypes[idx]||shiftTypes[0];
@@ -225,24 +255,54 @@ export default function RotaSystem() {
     setShiftModalTab("shift");
     setAbsencePickerCode("H");
     setOverHoursWarning(null);
+    setCasualBudgetWarning(null);
     setShowShiftModal(true);
   }
 
   function saveShift(){
-    if(!overHoursWarning){
-      const member=staff.find(s=>s.id===selectedCell.staffId);
-      const newHrs=calcHours(shiftEdit.start,shiftEdit.end,shiftEdit.brk);
-      const oldHrs=shifts[selectedCell.key]
-        ?calcHours(shifts[selectedCell.key].start,shifts[selectedCell.key].end,shifts[selectedCell.key].brk):0;
-      const currentHrs=(staffStats[selectedCell.staffId]||{hours:0}).hours;
-      const newTotal=currentHrs-oldHrs+newHrs;
-      const target=(member?.contracted||0)*numWeeks;
-      if(newTotal>target){
-        setOverHoursWarning({overBy:newTotal-target,name:member?.name});
-        return;
+    const member=staff.find(s=>s.id===selectedCell.staffId);
+    const isZeroHours=(member?.contractType||"full_time")==="zero_hours";
+    const newHrs=calcHours(shiftEdit.start,shiftEdit.end,shiftEdit.brk);
+    const oldHrs=shifts[selectedCell.key]
+      ?calcHours(shifts[selectedCell.key].start,shifts[selectedCell.key].end,shifts[selectedCell.key].brk):0;
+
+    if(isZeroHours){
+      if(!casualBudgetWarning){
+        const shiftDate=addDays(baseMonday,selectedCell.weekIdx*7+selectedCell.dayIdx);
+        const shiftMonth=shiftDate.getMonth();
+        const shiftYear=shiftDate.getFullYear();
+        const budgetKey=CASUAL_BUDGET_KEYS[shiftMonth];
+        const monthBudget=casualBudget[budgetKey]||0;
+        const zeroIds=new Set(staff.filter(s=>(s.contractType||"full_time")==="zero_hours").map(s=>String(s.id)));
+        let monthTotal=0;
+        Object.entries(shifts).forEach(([key,shift])=>{
+          if(key===selectedCell.key) return;
+          const m=key.match(/^(.+)-w(-?\d+)-d(\d+)$/);
+          if(!m||!zeroIds.has(m[1])) return;
+          const date=addDays(baseMonday,parseInt(m[2])*7+parseInt(m[3]));
+          if(date.getFullYear()===shiftYear&&date.getMonth()===shiftMonth)
+            monthTotal+=calcHours(shift.start,shift.end,shift.brk);
+        });
+        monthTotal+=newHrs;
+        if(monthTotal>monthBudget){
+          setCasualBudgetWarning({overBy:monthTotal-monthBudget});
+          return;
+        }
       }
+      setCasualBudgetWarning(null);
+    } else {
+      if(!overHoursWarning){
+        const currentHrs=(staffStats[selectedCell.staffId]||{hours:0}).hours;
+        const newTotal=currentHrs-oldHrs+newHrs;
+        const target=(member?.contracted||0)*numWeeks;
+        if(newTotal>target){
+          setOverHoursWarning({overBy:newTotal-target,name:member?.name});
+          return;
+        }
+      }
+      setOverHoursWarning(null);
     }
-    setOverHoursWarning(null);
+
     const wasEmpty=!shifts[selectedCell.key];
     setShifts(p=>({...p,[selectedCell.key]:{...shiftEdit}}));
     if(wasEmpty&&isWeekend(selectedCell.dayIdx))
@@ -333,7 +393,7 @@ export default function RotaSystem() {
     });
   }
 
-  function saveSettings(){ setLocations([...locDraft]); setShiftTypes([...stDraft]); showNotif("Settings saved ✓"); }
+  function saveSettings(){ setLocations([...locDraft]); setShiftTypes([...stDraft]); setCasualBudget({...casualBudgetDraft}); showNotif("Settings saved ✓"); }
 
   function addLocation(){
     const id="loc_"+Date.now();
@@ -896,7 +956,7 @@ export default function RotaSystem() {
                 {profileTab==="overview"&&(
                   <>
                     {/* Editable fields */}
-                    <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,marginBottom:14,display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:12}}>
+                    <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,marginBottom:14,display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:12}}>
                       <div>
                         <label style={FL}>Contracted hrs/wk</label>
                         <input type="number" value={member.contracted??""} onChange={e=>updateStaffField(member.id,{contracted:Number(e.target.value)||0})} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
@@ -919,6 +979,14 @@ export default function RotaSystem() {
                         <label style={FL}>Department</label>
                         <select value={member.department||departments[0]?.id||""} onChange={e=>updateStaffField(member.id,{department:e.target.value})} style={IS}>
                           {departments.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={FL}>Contract Type</label>
+                        <select value={member.contractType||"full_time"} onChange={e=>updateStaffField(member.id,{contractType:e.target.value})} style={IS}>
+                          <option value="full_time">Full Time</option>
+                          <option value="part_time">Part Time</option>
+                          <option value="zero_hours">Zero Hours / Casual</option>
                         </select>
                       </div>
                     </div>
@@ -1202,6 +1270,79 @@ export default function RotaSystem() {
               })}
             </div>
           </div>
+
+          {/* Casual Hours Budget */}
+          {(()=>{
+            const now=new Date();
+            const currentMonth=now.getMonth();
+            const thisYear=now.getFullYear();
+            const annualBudget=CASUAL_BUDGET_KEYS.reduce((a,k)=>a+(casualBudget[k]||0),0);
+            const usedYTD=casualMonthlyHours.slice(0,currentMonth).reduce((a,v)=>a+v,0);
+            const remaining=annualBudget-usedYTD;
+            const monthsOver=CASUAL_BUDGET_KEYS.filter((k,i)=>i<currentMonth&&casualMonthlyHours[i]>(casualBudget[k]||0)).length;
+            return(
+              <>
+                <h3 style={{fontSize:14,fontWeight:700,margin:"18px 0 10px"}}>Casual Hours Budget — {thisYear}</h3>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                  {[
+                    ["Annual Budget",`${annualBudget.toFixed(1)}h`,"neutral"],
+                    ["Used YTD",`${usedYTD.toFixed(1)}h`,"neutral"],
+                    ["Remaining",`${remaining.toFixed(1)}h`,remaining>=0?"good":"bad"],
+                    ["Months Over Budget",monthsOver,monthsOver===0?"good":"bad"],
+                  ].map(([lbl,val,tone])=>(
+                    <div key={lbl} style={{background:tone==="good"?"hsl(160 84% 39% / 0.08)":tone==="bad"?"hsl(0 84% 39% / 0.06)":"var(--background)",border:"1px solid var(--border)",borderRadius:9,padding:"12px 14px"}}>
+                      <div style={{fontSize:10,fontWeight:600,color:"var(--muted-foreground)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:6}}>{lbl}</div>
+                      <div style={{fontSize:20,fontWeight:700,fontFamily:"DM Mono,monospace",color:tone==="good"?"hsl(160 84% 25%)":tone==="bad"?"var(--destructive)":"var(--foreground)"}}>{val}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:11,overflow:"hidden",marginBottom:14}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead>
+                      <tr>
+                        {["Month","Budget (hrs)","Actual (hrs)","Difference","Usage","Status"].map(h=>(
+                          <th key={h} style={{padding:"8px 12px",textAlign:h==="Month"?"left":"center",fontSize:10,fontWeight:600,color:"var(--muted-foreground)",borderBottom:"1px solid var(--border)",background:"var(--secondary)"}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {CASUAL_BUDGET_KEYS.map((key,i)=>{
+                        const budget=casualBudget[key]||0;
+                        const actual=casualMonthlyHours[i];
+                        const diff=actual-budget;
+                        const pct=budget>0?Math.min(100,(actual/budget)*100):0;
+                        const isCompleted=i<currentMonth;
+                        const isOver=isCompleted&&diff>0;
+                        const isNear=isCompleted&&!isOver&&actual>=budget*0.9;
+                        const statusLabel=!isCompleted?"Upcoming":isOver?"Over":isNear?"Near limit":"On track";
+                        const statusColor=!isCompleted?"var(--muted-foreground)":isOver?"#dc2626":isNear?"#d97706":"#16a34a";
+                        const statusBg=!isCompleted?"var(--secondary)":isOver?"#FEF2F2":isNear?"#FFFBEB":"#F0FDF4";
+                        const diffColor=!isCompleted?"var(--muted-foreground)":isOver?"#dc2626":isNear?"#d97706":"#16a34a";
+                        return(
+                          <tr key={key} style={{borderTop:"1px solid var(--border)",background:i===currentMonth?"hsl(220 100% 98%)":"inherit"}}>
+                            <td style={{padding:"8px 12px",fontWeight:500}}>{MONTH_NAMES[i]}</td>
+                            <td style={{padding:"8px 12px",textAlign:"center",fontFamily:"DM Mono,monospace"}}>{budget.toFixed(1)}</td>
+                            <td style={{padding:"8px 12px",textAlign:"center",fontFamily:"DM Mono,monospace",color:isCompleted?"var(--foreground)":"var(--muted-foreground)"}}>{actual.toFixed(1)}</td>
+                            <td style={{padding:"8px 12px",textAlign:"center",fontFamily:"DM Mono,monospace",fontWeight:600,color:diffColor}}>
+                              {isCompleted?(diff>=0?"+":"")+diff.toFixed(1):"—"}
+                            </td>
+                            <td style={{padding:"8px 12px",textAlign:"center"}}>
+                              <div style={{width:80,height:6,background:"var(--secondary)",borderRadius:3,margin:"0 auto"}}>
+                                <div style={{width:`${pct}%`,height:"100%",background:isOver?"#dc2626":isNear?"#d97706":"#16a34a",borderRadius:3}}/>
+                              </div>
+                            </td>
+                            <td style={{padding:"8px 12px",textAlign:"center"}}>
+                              <span style={{background:statusBg,color:statusColor,padding:"2px 8px",borderRadius:8,fontSize:10,fontWeight:700}}>{statusLabel}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -1340,9 +1481,22 @@ export default function RotaSystem() {
             })}
           </div>
           <button onClick={addShiftType}
-            style={{marginBottom:16,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
+            style={{marginBottom:28,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
             + Add Shift Type
           </button>
+
+          {/* Casual Budget */}
+          <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Casual Budget (hours per month)</h3>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:12,marginBottom:28}}>
+            {CASUAL_BUDGET_KEYS.map((key,i)=>(
+              <div key={key} style={{background:"#fff",border:"1px solid #E8EFF5",borderRadius:10,padding:14}}>
+                <label style={FL}>{MONTH_NAMES[i]}</label>
+                <input type="number" min="0" value={casualBudgetDraft[key]??0}
+                  onChange={e=>setCasualBudgetDraft(p=>({...p,[key]:Number(e.target.value)||0}))}
+                  style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+              </div>
+            ))}
+          </div>
 
           {/* Fixed save bar */}
           <div style={{position:"fixed",bottom:0,left:0,right:0,background:"var(--background)",borderTop:"1px solid var(--border)",padding:"12px 20px",display:"flex",justifyContent:"flex-end",alignItems:"center",gap:12,zIndex:100}}>
@@ -1478,6 +1632,23 @@ export default function RotaSystem() {
                       </div>
                       <div style={{display:"flex",gap:7}}>
                         <button onClick={()=>setOverHoursWarning(null)}
+                          style={{flex:1,border:"1.5px solid var(--border)",background:"var(--background)",borderRadius:7,padding:"6px",fontSize:11,fontFamily:"inherit",cursor:"pointer",fontWeight:600}}>
+                          Cancel
+                        </button>
+                        <button onClick={saveShift}
+                          style={{flex:1,background:"#d97706",color:"#fff",border:"none",borderRadius:7,padding:"6px",fontSize:11,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>
+                          Save Anyway
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {casualBudgetWarning&&(
+                    <div style={{background:"#FFF3CD",border:"1px solid var(--warning)",borderRadius:7,padding:"9px 11px",marginTop:9}}>
+                      <div style={{fontSize:11,fontWeight:700,color:"#92400e",marginBottom:7}}>
+                        ⚠ This puts casual hours {casualBudgetWarning.overBy.toFixed(1)}h over the monthly budget.
+                      </div>
+                      <div style={{display:"flex",gap:7}}>
+                        <button onClick={()=>setCasualBudgetWarning(null)}
                           style={{flex:1,border:"1.5px solid var(--border)",background:"var(--background)",borderRadius:7,padding:"6px",fontSize:11,fontFamily:"inherit",cursor:"pointer",fontWeight:600}}>
                           Cancel
                         </button>
