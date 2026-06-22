@@ -71,6 +71,7 @@ function migrateStaff(arr) {
     absences:          {},
     department:        "foh",
     contractType:      "full_time",
+    allowedLocations:  [],
     ...s,
   }));
 }
@@ -1015,6 +1016,29 @@ export default function RotaSystem() {
                           <option value="part_time">Part Time</option>
                           <option value="zero_hours">Zero Hours / Casual</option>
                         </select>
+                      </div>
+                    </div>
+
+                    {/* Allowed locations */}
+                    <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,marginBottom:14}}>
+                      <div style={{fontSize:11,fontWeight:700,color:"var(--muted-foreground)",marginBottom:3}}>Allowed locations</div>
+                      <div style={{fontSize:11,color:"var(--muted-foreground)",marginBottom:10}}>Select the locations this staff member can work at.</div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:7}}>
+                        {locations.map(loc=>{
+                          const allowed=(member.allowedLocations||[]).includes(loc.id);
+                          return(
+                            <button key={loc.id}
+                              onClick={()=>{
+                                const current=member.allowedLocations||[];
+                                updateStaffField(member.id,{allowedLocations:allowed?current.filter(id=>id!==loc.id):[...current,loc.id]});
+                              }}
+                              style={{display:"flex",alignItems:"center",gap:6,padding:"7px 11px",borderRadius:8,border:`2px solid ${allowed?"hsl(160 84% 39%)":"var(--border)"}`,background:allowed?"hsl(160 84% 39% / 0.08)":"var(--background)",color:allowed?"hsl(160 84% 25%)":"var(--muted-foreground)",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600,transition:"all .12s"}}>
+                              <div style={{width:8,height:8,borderRadius:"50%",background:allowed?"hsl(160 84% 39%)":loc.border,flexShrink:0}}/>
+                              {loc.label}
+                              {allowed&&<span style={{marginLeft:2,fontSize:10}}>✓</span>}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
 
