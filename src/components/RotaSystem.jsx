@@ -118,6 +118,7 @@ export default function RotaSystem() {
     return DEFAULT_DEPARTMENTS;
   });
   const [deptDeleteError,   setDeptDeleteError]   = useState(null); // dept id that can't be deleted
+  const [expandedDepts,     setExpandedDepts]     = useState({});
   const [absenceViewYear,   setAbsenceViewYear]   = useState(()=>new Date().getFullYear());
   const [absenceViewMonth,  setAbsenceViewMonth]  = useState(()=>new Date().getMonth());
   const profileViewYear = new Date().getFullYear();
@@ -333,6 +334,18 @@ export default function RotaSystem() {
   }
 
   function saveSettings(){ setLocations([...locDraft]); setShiftTypes([...stDraft]); showNotif("Settings saved ✓"); }
+
+  function addLocation(){
+    const id="loc_"+Date.now();
+    const d=deriveLocColors("#6b7280","New Location");
+    setLocDraft(p=>[...p,{id,label:"New Location",...d}]);
+  }
+
+  function addShiftType(){
+    const idx=stDraft.reduce((m,t)=>Math.max(m,t.idx),0)+1;
+    const d=deriveSTColors("#6b7280");
+    setStDraft(p=>[...p,{idx,label:"New Shift Type",...d}]);
+  }
 
   // ── new helpers ──────────────────────────────────────────────────────────
   function updateStaffField(id,patch){
@@ -744,43 +757,65 @@ export default function RotaSystem() {
                 <h2 style={{margin:0,fontSize:17,fontWeight:700}}>Staff Directory</h2>
                 <button onClick={()=>setShowStaffModal(true)} style={SB}>+ Add Staff Member</button>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
-                {staff.map(member=>{
-                  const stats=staffStats[member.id]||{hours:0,wkndShifts:0};
-                  return(
-                    <div key={member.id}
-                      style={{background:"var(--background)",borderRadius:11,padding:16,border:"1px solid var(--border)",borderTop:`4px solid ${member.color}`,cursor:"pointer"}}
-                      onClick={()=>{ setSelectedStaffId(member.id); setProfileTab("overview"); setAbsencePickerDate(null); }}>
-                      <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:10}}>
-                        <div style={{width:38,height:38,borderRadius:"50%",background:member.color,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700}}>{member.avatar}</div>
-                        <div>
-                          <div style={{fontWeight:700,fontSize:13}}>{member.name}</div>
-                          <div style={{fontSize:10,color:"var(--muted-foreground)",background:"var(--secondary)",padding:"1px 6px",borderRadius:8,display:"inline-block",marginTop:1}}>{member.role}</div>
-                        </div>
-                      </div>
-                      {member.email&&(
-                        <div style={{fontSize:11,color:"var(--muted-foreground)",marginBottom:8,display:"flex",alignItems:"center",gap:4,overflow:"hidden"}}>
-                          <span>📧</span><span style={{textOverflow:"ellipsis",overflow:"hidden",whiteSpace:"nowrap"}}>{member.email}</span>
-                        </div>
-                      )}
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
-                        {[["Contract",`${member.contracted}h`],["This Period",`${stats.hours.toFixed(1)}h`],["🏖 Wknds",member.weekendsWorked]].map(([l,v])=>(
-                          <div key={l} style={{background:"var(--secondary)",borderRadius:7,padding:"6px",textAlign:"center"}}>
-                            <div style={{fontSize:13,fontWeight:700}}>{v}</div><div style={{fontSize:9,color:"var(--muted-foreground)"}}>{l}</div>
-                          </div>
-                        ))}
-                      </div>
-                      <div style={{width:"100%",height:4,background:"var(--secondary)",borderRadius:3}}>
-                        <div style={{width:`${Math.min(100,(stats.hours/(member.contracted*numWeeks))*100)}%`,height:"100%",background:member.color,borderRadius:3}}/>
-                      </div>
-                      <button onClick={e=>{ e.stopPropagation(); removeStaff(member.id); }}
-                        style={{marginTop:9,width:"100%",border:`1px solid var(--destructive)`,background:"#FFF5F5",color:"var(--destructive)",borderRadius:6,padding:"5px",fontSize:11,fontFamily:"inherit",cursor:"pointer",fontWeight:500}}>
-                        Remove
-                      </button>
+              {departments.map(dept=>{
+                const deptStaff=staff.filter(s=>s.department===dept.id);
+                const open=!!expandedDepts[dept.id];
+                return(
+                  <div key={dept.id} style={{marginBottom:10}}>
+                    <div onClick={()=>setExpandedDepts(p=>({...p,[dept.id]:!p[dept.id]}))}
+                      style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:"var(--secondary)",border:"1px solid var(--border)",borderRadius:open?"10px 10px 0 0":10,cursor:"pointer",userSelect:"none"}}>
+                      <span style={{fontSize:12,display:"inline-block",transform:open?"rotate(90deg)":"rotate(0deg)",transition:"transform .2s",lineHeight:1}}>▸</span>
+                      <span style={{fontWeight:700,fontSize:13,flex:1}}>{dept.label}</span>
+                      <span style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:12,padding:"1px 8px",fontSize:11,fontWeight:700,color:"var(--muted-foreground)"}}>{deptStaff.length}</span>
                     </div>
-                  );
-                })}
-              </div>
+                    {open&&(
+                      <div style={{border:"1px solid var(--border)",borderTop:"none",borderRadius:"0 0 10px 10px",padding:12}}>
+                        {deptStaff.length===0?(
+                          <div style={{fontSize:12,color:"var(--muted-foreground)",padding:"8px 4px"}}>No staff in this department.</div>
+                        ):(
+                          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
+                            {deptStaff.map(member=>{
+                              const stats=staffStats[member.id]||{hours:0,wkndShifts:0};
+                              return(
+                                <div key={member.id}
+                                  style={{background:"var(--background)",borderRadius:11,padding:16,border:"1px solid var(--border)",borderTop:`4px solid ${member.color}`,cursor:"pointer"}}
+                                  onClick={()=>{ setSelectedStaffId(member.id); setProfileTab("overview"); setAbsencePickerDate(null); }}>
+                                  <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:10}}>
+                                    <div style={{width:38,height:38,borderRadius:"50%",background:member.color,color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700}}>{member.avatar}</div>
+                                    <div>
+                                      <div style={{fontWeight:700,fontSize:13}}>{member.name}</div>
+                                      <div style={{fontSize:10,color:"var(--muted-foreground)",background:"var(--secondary)",padding:"1px 6px",borderRadius:8,display:"inline-block",marginTop:1}}>{member.role}</div>
+                                    </div>
+                                  </div>
+                                  {member.email&&(
+                                    <div style={{fontSize:11,color:"var(--muted-foreground)",marginBottom:8,display:"flex",alignItems:"center",gap:4,overflow:"hidden"}}>
+                                      <span>📧</span><span style={{textOverflow:"ellipsis",overflow:"hidden",whiteSpace:"nowrap"}}>{member.email}</span>
+                                    </div>
+                                  )}
+                                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
+                                    {[["Contract",`${member.contracted}h`],["This Period",`${stats.hours.toFixed(1)}h`],["🏖 Wknds",member.weekendsWorked]].map(([l,v])=>(
+                                      <div key={l} style={{background:"var(--secondary)",borderRadius:7,padding:"6px",textAlign:"center"}}>
+                                        <div style={{fontSize:13,fontWeight:700}}>{v}</div><div style={{fontSize:9,color:"var(--muted-foreground)"}}>{l}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div style={{width:"100%",height:4,background:"var(--secondary)",borderRadius:3}}>
+                                    <div style={{width:`${Math.min(100,(stats.hours/(member.contracted*numWeeks))*100)}%`,height:"100%",background:member.color,borderRadius:3}}/>
+                                  </div>
+                                  <button onClick={e=>{ e.stopPropagation(); removeStaff(member.id); }}
+                                    style={{marginTop:9,width:"100%",border:`1px solid var(--destructive)`,background:"#FFF5F5",color:"var(--destructive)",borderRadius:6,padding:"5px",fontSize:11,fontFamily:"inherit",cursor:"pointer",fontWeight:500}}>
+                                    Remove
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </>
           ):(()=>{
             const member=staff.find(s=>s.id===selectedStaffId);
@@ -1210,7 +1245,7 @@ export default function RotaSystem() {
 
           {/* Locations */}
           <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Locations</h3>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12,marginBottom:28}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12,marginBottom:8}}>
             {locDraft.map((loc,i)=>{
               const orig=LOCATIONS.find(l=>l.id===loc.id);
               return(
@@ -1241,18 +1276,30 @@ export default function RotaSystem() {
                       setLocDraft(p=>p.map((l,j)=>j===i?{...l,...d}:l));
                     }} style={{width:34,height:28,border:"1px solid var(--border)",borderRadius:5,cursor:"pointer",padding:2,background:"none"}}/>
                   </div>
-                  <button onClick={()=>setLocDraft(p=>p.map((l,j)=>j===i?JSON.parse(JSON.stringify(orig)):l))}
-                    style={{background:"none",border:"none",color:"var(--muted-foreground)",fontSize:11,cursor:"pointer",textDecoration:"underline",padding:0}}>
-                    reset to default
-                  </button>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:6}}>
+                    {orig&&(
+                      <button onClick={()=>setLocDraft(p=>p.map((l,j)=>j===i?JSON.parse(JSON.stringify(orig)):l))}
+                        style={{background:"none",border:"none",color:"var(--muted-foreground)",fontSize:11,cursor:"pointer",textDecoration:"underline",padding:0}}>
+                        reset to default
+                      </button>
+                    )}
+                    <button onClick={()=>setLocDraft(p=>p.filter((_,j)=>j!==i))}
+                      style={{marginLeft:"auto",border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:5,padding:"3px 9px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                      Delete
+                    </button>
+                  </div>
                 </div>
               );
             })}
           </div>
+          <button onClick={addLocation}
+            style={{marginBottom:28,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
+            + Add Location
+          </button>
 
           {/* Shift Types */}
           <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Shift Types</h3>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12,marginBottom:16}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12,marginBottom:8}}>
             {stDraft.map((st,i)=>{
               const orig=SHIFT_TYPES.find(t=>t.idx===st.idx);
               return(
@@ -1276,14 +1323,26 @@ export default function RotaSystem() {
                       setStDraft(p=>p.map((t,j)=>j===i?{...t,...d}:t));
                     }} style={{width:34,height:28,border:"1px solid var(--border)",borderRadius:5,cursor:"pointer",padding:2,background:"none"}}/>
                   </div>
-                  <button onClick={()=>setStDraft(p=>p.map((t,j)=>j===i?JSON.parse(JSON.stringify(orig)):t))}
-                    style={{background:"none",border:"none",color:"var(--muted-foreground)",fontSize:11,cursor:"pointer",textDecoration:"underline",padding:0}}>
-                    reset to default
-                  </button>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:6}}>
+                    {orig&&(
+                      <button onClick={()=>setStDraft(p=>p.map((t,j)=>j===i?JSON.parse(JSON.stringify(orig)):t))}
+                        style={{background:"none",border:"none",color:"var(--muted-foreground)",fontSize:11,cursor:"pointer",textDecoration:"underline",padding:0}}>
+                        reset to default
+                      </button>
+                    )}
+                    <button onClick={()=>setStDraft(p=>p.filter((_,j)=>j!==i))}
+                      style={{marginLeft:"auto",border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:5,padding:"3px 9px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                      Delete
+                    </button>
+                  </div>
                 </div>
               );
             })}
           </div>
+          <button onClick={addShiftType}
+            style={{marginBottom:16,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
+            + Add Shift Type
+          </button>
 
           {/* Fixed save bar */}
           <div style={{position:"fixed",bottom:0,left:0,right:0,background:"var(--background)",borderTop:"1px solid var(--border)",padding:"12px 20px",display:"flex",justifyContent:"flex-end",alignItems:"center",gap:12,zIndex:100}}>
