@@ -131,7 +131,7 @@ export default function RotaSystem() {
     return DEFAULT_JOB_TITLES.map(t=>({...t}));
   });
   const [planner, setPlanner] = useState(()=>{
-    try{ const s=localStorage.getItem(PLANNER_KEY); if(s) return JSON.parse(s); }catch{}
+    try{ const s=localStorage.getItem(PLANNER_KEY); if(s) return {weekdayTemplate:[],weekendTemplate:[],overrides:{},...JSON.parse(s)}; }catch{}
     return {weekdayTemplate:[],weekendTemplate:[],overrides:{}};
   });
 
@@ -166,6 +166,10 @@ export default function RotaSystem() {
   const [plannerYear,        setPlannerYear]        = useState(()=>new Date().getFullYear());
   const [plannerMonth,       setPlannerMonth]       = useState(()=>new Date().getMonth());
   const [plannerSelectedDay, setPlannerSelectedDay] = useState(null);
+  const [proposedRota,     setProposedRota]     = useState(null); // generated rota object or null
+  const [reviewWeekIdx,    setReviewWeekIdx]    = useState(0);
+  const [warningApprovals, setWarningApprovals] = useState({}); // weekIndex -> { warningKey: true }
+  const [assigningUid,     setAssigningUid]     = useState(null); // uid of unfilled slot being assigned
   const profileViewYear = new Date().getFullYear();
 
   const [dailyInfoRows,   setDailyInfoRows]   = useState(()=>{
@@ -281,6 +285,7 @@ export default function RotaSystem() {
   const getLoc   = id  => locations.find(l=>l.id===id)||locations[0];
   const getStype = idx => shiftTypes[idx]||shiftTypes[0];
   const isPublished = weekStarts.every((_,wi)=>publishedWeeks.has(`${weekOffset}-${wi}`));
+  const hasSlots = (planner?.weekdayTemplate?.length ?? 0) > 0 || (planner?.weekendTemplate?.length ?? 0) > 0;
 
   function openShiftModal(staffId,weekIdx,dayIdx){
     const key=`${staffId}-w${weekIdx}-d${dayIdx}`;
@@ -474,14 +479,15 @@ export default function RotaSystem() {
     });
   }
 
+  function removePlannerOverride(dateKey){
+    setPlanner(p=>{ const next={...p.overrides}; delete next[dateKey]; return {...p,overrides:next}; });
+    setPlannerSelectedDay(prev=>prev===dateKey?null:prev);
+  }
+
   function handlePlannerDayClick(dateKey){
     if(planner.overrides[dateKey]!==undefined){
-      if(plannerSelectedDay===dateKey){
-        setPlanner(p=>{ const next={...p.overrides}; delete next[dateKey]; return {...p,overrides:next}; });
-        setPlannerSelectedDay(null);
-      } else {
-        setPlannerSelectedDay(dateKey);
-      }
+      // toggle the override editor open/closed; deletion is via the × button on the cell
+      setPlannerSelectedDay(plannerSelectedDay===dateKey?null:dateKey);
     } else {
       const [yr,mo,dy]=dateKey.split("-").map(Number);
       const dow=new Date(yr,mo-1,dy).getDay();
@@ -492,6 +498,274 @@ export default function RotaSystem() {
       });
       setPlannerSelectedDay(dateKey);
     }
+  }
+
+  // ── Phase 4: rota generation ─────────────────────────────────────────────
+  function generateRota(){
+    const year=plannerYear, month=plannerMonth;
+    const tot=daysInMonth(year,month);
+    const allShifts=[];
+    const assignedDays={}; // staffId -> Set<dateKey>
+    const weekDays={};     // staffId -> weekMonStr -> days assigned this week (max 5)
+    const weekHrs={};      // staffId -> weekMonStr -> hours assigned this week
+    const proposalWknd={}; // staffId -> weekend shift count in proposal
+
+    // ── Guaranteed weekend off ───────────────────────────────────────────────
+    // Track how many full weekends (both Sat+Sun off) each staff member has had.
+    // On the last complete weekend of the month, any staff member still at 0 is
+    // forced off both Sat and Sun, leaving those slots unfilled if necessary.
+    const fullWkndCount={};   // staffId -> full weekends off so far this month
+    const forcedOffSatSun=new Set(); // staffIds blocked from the current weekend
+    let forcedWeekendInfo=null; // { weekMon, staffIds } — set when enforcement fires
+
+    // Pre-compute complete weekends in the month (both Sat+Sun within the month)
+    const monthWeekends=[];
+    for(let d=1;d<=tot;d++){
+      const dt=new Date(year,month,d);
+      if(dt.getDay()===6){
+        const sunDt=addDays(dt,1);
+        if(sunDt.getMonth()===month)
+          monthWeekends.push({satDk:fmtDateKey(dt),sunDk:fmtDateKey(sunDt)});
+      }
+    }
+
+    // Supervisors/managers can fill any slot as fallback (Fix 5)
+    const isSupervisor=s=>/supervisor|manager|team leader/i.test(s.role||"");
+
+    staff.forEach(s=>{
+      assignedDays[s.id]=new Set();
+      weekDays[s.id]={};
+      weekHrs[s.id]={};
+      proposalWknd[s.id]=0;
+      fullWkndCount[s.id]=0;
+    });
+
+    for(let d=1;d<=tot;d++){
+      const date=new Date(year,month,d);
+      const dk=fmtDateKey(date);
+      const dow=date.getDay();
+      const isWknd=dow===0||dow===6;
+      const weekMon=fmtDateKey(getMondayOf(date));
+      const dkWdIdx=(dow+6)%7; // 0=Mon…6=Sun
+      const prevDk=dkWdIdx>0?fmtDateKey(addDays(date,-1)):null;
+
+      // Saturday: if this is the last complete weekend, force off any staff who
+      // have not yet had a full weekend off this month
+      if(dow===6){
+        forcedOffSatSun.clear();
+        const lastWknd=monthWeekends[monthWeekends.length-1];
+        if(lastWknd&&lastWknd.satDk===dk){
+          const forcedIds=[];
+          staff.forEach(s=>{ if(fullWkndCount[s.id]===0){ forcedOffSatSun.add(s.id); forcedIds.push(s.id); } });
+          if(forcedIds.length>0) forcedWeekendInfo={weekMon,staffIds:new Set(forcedIds)};
+        }
+      }
+
+      const slots=planner.overrides[dk]!==undefined
+        ?planner.overrides[dk]
+        :(isWknd?planner.weekendTemplate:planner.weekdayTemplate);
+
+      slots.forEach(slot=>{
+        const need=slot.staffCount||1;
+        const slotHrs=calcHours(slot.startTime,slot.endTime,0);
+
+        for(let i=0;i<need;i++){
+          let eligible=staff.filter(s=>{
+            if(!(s.allowedLocations||[]).includes(slot.locationId)) return false;
+            if((slot.allowedJobTitles||[]).length>0){
+              const roleMatch=slot.allowedJobTitles.some(jtId=>{
+                const jt=jobTitles.find(j=>j.id===jtId);
+                return jt&&jt.label===s.role;
+              });
+              // Supervisors/managers can fill any slot as fallback (Fix 5)
+              if(!roleMatch&&!isSupervisor(s)) return false;
+            }
+            if((s.absences||{})[dk]) return false;
+            if(assignedDays[s.id].has(dk)) return false;
+            // Hard stop at 5 days per calendar week (Bug 2)
+            if((weekDays[s.id]?.[weekMon]||0)>=5) return false;
+            // Guaranteed weekend off: block staff forced to take this weekend off
+            if(isWknd&&forcedOffSatSun.has(s.id)) return false;
+            return true;
+          });
+
+          // Sort priority differs for weekend vs weekday slots.
+          // Weekend: month-level weekend fairness is primary so that by end of
+          //   month each eligible staff member has ≤1 difference in weekend days.
+          // Weekday: week-level day-count fairness is primary.
+          eligible=eligible.slice().sort((a,b)=>{
+            // 1. Weekend slots: fewest weekend days assigned this month → first
+            if(isWknd){
+              const aW=proposalWknd[a.id]||0;
+              const bW=proposalWknd[b.id]||0;
+              if(aW!==bW) return aW-bW;
+            }
+
+            // 2. Fewest days assigned this calendar week
+            const aDays=weekDays[a.id]?.[weekMon]||0;
+            const bDays=weekDays[b.id]?.[weekMon]||0;
+            if(aDays!==bDays) return aDays-bDays;
+
+            // 3. Prefer consecutive working days:
+            //   0 = extending a run (prev day assigned) → best
+            //   1 = starting fresh (no days yet this week)
+            //   2 = would fragment (has days but not yesterday) → worst
+            const aAdj=prevDk?assignedDays[a.id].has(prevDk):false;
+            const bAdj=prevDk?assignedDays[b.id].has(prevDk):false;
+            const aConsec=aAdj?0:aDays>0?2:1;
+            const bConsec=bAdj?0:bDays>0?2:1;
+            if(aConsec!==bConsec) return aConsec-bConsec;
+
+            // 4. Most remaining contracted hours this week
+            const aIsZero=(a.contractType||"full_time")==="zero_hours";
+            const bIsZero=(b.contractType||"full_time")==="zero_hours";
+            if(!aIsZero||!bIsZero){
+              const aRem=(a.contracted||40)-(weekHrs[a.id]?.[weekMon]||0);
+              const bRem=(b.contracted||40)-(weekHrs[b.id]?.[weekMon]||0);
+              if(Math.abs(aRem-bRem)>0.01) return bRem-aRem;
+            }
+
+            // 5. Weekend tiebreak: fewest all-time weekend shifts
+            if(isWknd) return (a.weekendsWorked||0)-(b.weekendsWorked||0);
+            return 0;
+          });
+
+          const uid=`${dk}_${slot.id}_${i}`;
+          if(eligible.length>0){
+            const chosen=eligible[0];
+            allShifts.push({uid,date:dk,locationId:slot.locationId,startTime:slot.startTime,endTime:slot.endTime,staffId:chosen.id,unfilled:false});
+            assignedDays[chosen.id].add(dk);
+            weekDays[chosen.id][weekMon]=(weekDays[chosen.id][weekMon]||0)+1;
+            weekHrs[chosen.id][weekMon]=(weekHrs[chosen.id][weekMon]||0)+slotHrs;
+            if(isWknd) proposalWknd[chosen.id]++;
+          } else {
+            allShifts.push({uid,date:dk,locationId:slot.locationId,startTime:slot.startTime,endTime:slot.endTime,staffId:null,unfilled:true});
+          }
+        }
+      });
+
+      // Sunday: after slots are assigned, count how many staff had both Sat+Sun
+      // free this week (= a full weekend off), then clear the forced-off set
+      if(dow===0){
+        const satDt=addDays(date,-1);
+        if(satDt.getMonth()===month){
+          const satDk=fmtDateKey(satDt);
+          staff.forEach(s=>{
+            if(!assignedDays[s.id].has(satDk)&&!assignedDays[s.id].has(dk))
+              fullWkndCount[s.id]++;
+          });
+        }
+        forcedOffSatSun.clear();
+      }
+    }
+
+    // Group into Mon-Sun calendar weeks
+    const firstMon=getMondayOf(new Date(year,month,1));
+    const lastDayKey=fmtDateKey(new Date(year,month,tot));
+    const weeks=[];
+    let ws=new Date(firstMon.getFullYear(),firstMon.getMonth(),firstMon.getDate());
+    while(fmtDateKey(ws)<=lastDayKey){
+      const we=addDays(ws,6);
+      const startStr=fmtDateKey(ws);
+      const endStr=fmtDateKey(we);
+      const weekShifts=allShifts.filter(s=>s.date>=startStr&&s.date<=endStr);
+      const warnings=[];
+
+      // Forced weekend off — informational warning on the week it applies
+      if(forcedWeekendInfo&&forcedWeekendInfo.weekMon===startStr){
+        forcedWeekendInfo.staffIds.forEach(id=>{
+          const m=staff.find(s=>s.id===id);
+          if(m) warnings.push({key:`forced_wknd_${id}`,text:`${m.name} has been given this weekend off to guarantee at least 1 full weekend off this month`});
+        });
+      }
+
+      // Per-staff: over 5 days / over contracted hours for this week only (Bug 3)
+      const staffDays={};
+      const staffHrs={};
+      weekShifts.filter(s=>!s.unfilled).forEach(s=>{
+        if(!staffDays[s.staffId]) staffDays[s.staffId]=new Set();
+        staffDays[s.staffId].add(s.date);
+        staffHrs[s.staffId]=(staffHrs[s.staffId]||0)+calcHours(s.startTime,s.endTime,0);
+      });
+      staff.forEach(m=>{
+        const days=staffDays[m.id]?.size||0;
+        if(days>5) warnings.push({key:`over_days_${m.id}`,text:`${m.name} scheduled ${days} days this week (max 5)`});
+        // Zero-hours staff have no weekly contracted hours cap (Bug 3 / Fix 4)
+        const isZeroHrs=(m.contractType||"full_time")==="zero_hours";
+        if(!isZeroHrs){
+          const hrs=staffHrs[m.id]||0;
+          const contracted=m.contracted||40;
+          if(hrs>contracted) warnings.push({key:`over_hrs_${m.id}`,text:`${m.name}: ${hrs.toFixed(1)}h proposed vs ${contracted}h contracted this week`});
+          if(hrs<contracted) warnings.push({key:`under_hrs_${m.id}`,text:`${m.name} is under-hours this week — ${hrs.toFixed(1)}h proposed vs ${contracted}h contracted`});
+        }
+      });
+
+      // Unfilled slots
+      const unfilledCount=weekShifts.filter(s=>s.unfilled).length;
+      if(unfilledCount>0) warnings.push({key:"unfilled",text:`${unfilledCount} slot${unfilledCount===1?"":"s"} could not be filled automatically`});
+
+      // Casual budget (monthly total, attach warning to first week only)
+      if(weeks.length===0){
+        const budgetKey=CASUAL_BUDGET_KEYS[month];
+        const monthBudget=casualBudget[budgetKey]||0;
+        if(monthBudget>0){
+          const zeroIds=new Set(staff.filter(s=>(s.contractType||"full_time")==="zero_hours").map(s=>s.id));
+          const casualHrs=allShifts.filter(s=>!s.unfilled&&zeroIds.has(s.staffId))
+            .reduce((a,s)=>a+calcHours(s.startTime,s.endTime,0),0);
+          if(casualHrs>monthBudget) warnings.push({key:"casual_budget",text:`Casual budget: ${casualHrs.toFixed(1)}h proposed vs ${monthBudget}h budget for ${MONTH_NAMES[month]}`});
+        }
+      }
+
+      weeks.push({weekIndex:weeks.length,startDate:startStr,endDate:endStr,shifts:weekShifts,warnings});
+      ws=addDays(ws,7);
+    }
+
+    setProposedRota({year,month,weeks,approved:[],staffFullWkndOff:{...fullWkndCount}});
+    setReviewWeekIdx(0);
+    setWarningApprovals({});
+    setAssigningUid(null);
+  }
+
+  function removeProposedShift(weekIdx,uid){
+    setProposedRota(prev=>({
+      ...prev,
+      weeks:prev.weeks.map((w,wi)=>wi!==weekIdx?w:{
+        ...w,
+        shifts:w.shifts.map(s=>s.uid===uid?{...s,staffId:null,unfilled:true}:s),
+      }),
+    }));
+  }
+
+  function assignProposedShift(weekIdx,uid,staffId){
+    setProposedRota(prev=>({
+      ...prev,
+      weeks:prev.weeks.map((w,wi)=>wi!==weekIdx?w:{
+        ...w,
+        shifts:w.shifts.map(s=>s.uid===uid?{...s,staffId:Number(staffId),unfilled:false}:s),
+      }),
+    }));
+    setAssigningUid(null);
+  }
+
+  function approveWeek(weekIdx){
+    const week=proposedRota.weeks[weekIdx];
+    const newShifts={...shifts};
+    week.shifts.filter(s=>!s.unfilled&&s.staffId!=null).forEach(s=>{
+      const date=new Date(s.date+"T00:00:00");
+      const wkIdx=Math.round((getMondayOf(date)-baseMonday)/(7*24*3600*1000));
+      const dayIdx=(date.getDay()+6)%7;
+      const h=parseInt(s.startTime.split(":")[0],10);
+      const typeIdx=h<12
+        ?(shiftTypes.find(st=>st.label==="Morning")?.idx??shiftTypes[0]?.idx??0)
+        :h<17
+          ?(shiftTypes.find(st=>st.label==="Afternoon")?.idx??shiftTypes[1]?.idx??1)
+          :(shiftTypes.find(st=>st.label==="Evening")?.idx??shiftTypes[2]?.idx??2);
+      newShifts[`${s.staffId}-w${wkIdx}-d${dayIdx}`]={start:s.startTime,end:s.endTime,typeIdx,locationId:s.locationId,brk:30};
+    });
+    setShifts(newShifts);
+    setProposedRota(prev=>({...prev,approved:[...prev.approved,weekIdx]}));
+    if(weekIdx<proposedRota.weeks.length-1) setReviewWeekIdx(weekIdx+1);
+    showNotif(`Week ${weekIdx+1} approved and written to rota ✓`);
   }
 
   // ── new helpers ──────────────────────────────────────────────────────────
@@ -1307,7 +1581,239 @@ export default function RotaSystem() {
       )}
 
       {/* ===== PLANNER TAB ===== */}
-      {activeTab==="planner"&&(
+      {activeTab==="planner"&&proposedRota&&(()=>{
+        const week=proposedRota.weeks[reviewWeekIdx];
+        const isApproved=proposedRota.approved.includes(reviewWeekIdx);
+        const allApproved=proposedRota.approved.length===proposedRota.weeks.length;
+        const weekApprovals=warningApprovals[reviewWeekIdx]||{};
+        const canApprove=!isApproved&&(week.warnings.length===0||week.warnings.every(w=>weekApprovals[w.key]));
+
+        // Build grid data
+        const [sy,sm,sd]=week.startDate.split("-").map(Number);
+        const weekDates=Array.from({length:7},(_,i)=>addDays(new Date(sy,sm-1,sd),i));
+        const inMonth=dt=>dt.getMonth()===proposedRota.month&&dt.getFullYear()===proposedRota.year;
+
+        const shiftsByStaff={}; // staffId -> dateKey -> shift[]
+        const unfilledByDate={}; // dateKey -> shift[]
+        week.shifts.forEach(s=>{
+          if(s.unfilled){
+            if(!unfilledByDate[s.date]) unfilledByDate[s.date]=[];
+            unfilledByDate[s.date].push(s);
+          } else {
+            if(!shiftsByStaff[s.staffId]) shiftsByStaff[s.staffId]={};
+            if(!shiftsByStaff[s.staffId][s.date]) shiftsByStaff[s.staffId][s.date]=[];
+            shiftsByStaff[s.staffId][s.date].push(s);
+          }
+        });
+        const activeStaff=staff.filter(s=>shiftsByStaff[s.id]);
+        const hasUnfilled=Object.keys(unfilledByDate).length>0;
+
+        // Summary stats for "all approved" screen
+        const totalShifts=proposedRota.weeks.flatMap(w=>w.shifts).filter(s=>!s.unfilled).length;
+        const totalHrs=proposedRota.weeks.flatMap(w=>w.shifts).filter(s=>!s.unfilled)
+          .reduce((a,s)=>a+calcHours(s.startTime,s.endTime,0),0);
+        const estCost=(totalHrs*WAGE_RATE).toLocaleString("en-GB",{style:"currency",currency:"GBP",maximumFractionDigits:0});
+
+        return(
+          <div style={{padding:"14px 18px 80px"}}>
+            {/* Header */}
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:8}}>
+              <div>
+                <h2 style={{margin:"0 0 2px",fontSize:17,fontWeight:700}}>
+                  Review proposed rota — {MONTH_NAMES[proposedRota.month]} {proposedRota.year}
+                </h2>
+                <p style={{margin:0,fontSize:12,color:"var(--muted-foreground)"}}>Approve each week to write shifts to the rota.</p>
+              </div>
+              <button onClick={()=>{ if(window.confirm("Discard this proposed rota and return to the planner?")){ setProposedRota(null); setWarningApprovals({}); setReviewWeekIdx(0); setAssigningUid(null); } }}
+                style={{border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:7,padding:"6px 13px",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                ← Back to planner
+              </button>
+            </div>
+
+            {allApproved?(
+              /* ── Rota complete summary ── */
+              <div style={{background:"#F0FDF4",border:"1.5px solid #10b981",borderRadius:12,padding:24,textAlign:"center"}}>
+                <div style={{fontSize:32,marginBottom:8}}>✓</div>
+                <h3 style={{margin:"0 0 6px",fontSize:16,fontWeight:700,color:"#065f46"}}>Rota complete!</h3>
+                <p style={{margin:"0 0 18px",fontSize:13,color:"#047857"}}>All weeks approved and written to the rota.</p>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,maxWidth:340,margin:"0 auto 20px"}}>
+                  {[["Shifts",totalShifts],["Hours",`${totalHrs.toFixed(0)}h`],["Est. cost",estCost]].map(([lbl,val])=>(
+                    <div key={lbl} style={{background:"#fff",border:"1px solid #6ee7b7",borderRadius:9,padding:"12px 8px"}}>
+                      <div style={{fontSize:18,fontWeight:700,color:"#065f46"}}>{val}</div>
+                      <div style={{fontSize:11,color:"#047857",marginTop:2}}>{lbl}</div>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={()=>{ setProposedRota(null); setWarningApprovals({}); setReviewWeekIdx(0); }}
+                  style={{background:"#10b981",color:"#fff",border:"none",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+                  Back to planner
+                </button>
+              </div>
+            ):(
+              <>
+                {/* Week navigator + progress */}
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,flexWrap:"wrap"}}>
+                  <button onClick={()=>setReviewWeekIdx(i=>Math.max(0,i-1))} disabled={reviewWeekIdx===0}
+                    style={{...NB,opacity:reviewWeekIdx===0?.4:1}}>‹</button>
+                  <span style={{fontSize:14,fontWeight:700}}>Week {reviewWeekIdx+1} of {proposedRota.weeks.length}</span>
+                  <button onClick={()=>setReviewWeekIdx(i=>Math.min(proposedRota.weeks.length-1,i+1))} disabled={reviewWeekIdx===proposedRota.weeks.length-1}
+                    style={{...NB,opacity:reviewWeekIdx===proposedRota.weeks.length-1?.4:1}}>›</button>
+                  <div style={{display:"flex",gap:5,marginLeft:6}}>
+                    {proposedRota.weeks.map((w,i)=>{
+                      const done=proposedRota.approved.includes(i);
+                      return(
+                        <div key={i} onClick={()=>setReviewWeekIdx(i)}
+                          style={{width:26,height:26,borderRadius:"50%",border:`2px solid ${done?"#10b981":i===reviewWeekIdx?"hsl(160 84% 39%)":"var(--border)"}`,background:done?"#10b981":i===reviewWeekIdx?"hsl(160 84% 39% / 0.12)":"var(--background)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:done?"#fff":i===reviewWeekIdx?"hsl(160 84% 25%)":"var(--muted-foreground)",transition:"all .12s"}}>
+                          {done?"✓":i+1}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <span style={{fontSize:11,color:"var(--muted-foreground)",marginLeft:4}}>
+                    {week.startDate} – {week.endDate}
+                  </span>
+                  {isApproved&&<span style={{fontSize:11,fontWeight:700,color:"#10b981",background:"#F0FDF4",border:"1px solid #6ee7b7",borderRadius:5,padding:"2px 8px"}}>Approved ✓</span>}
+                </div>
+
+                {/* Mini rota grid */}
+                <div style={{overflowX:"auto",marginBottom:16}}>
+                  <div style={{minWidth:600}}>
+                    {/* Column headers */}
+                    <div style={{display:"grid",gridTemplateColumns:`140px repeat(7,1fr)`,gap:2,marginBottom:3}}>
+                      <div/>
+                      {weekDates.map((dt,i)=>{
+                        const inM=inMonth(dt);
+                        return(
+                          <div key={i} style={{textAlign:"center",padding:"4px 2px",background:inM?"var(--secondary)":"hsl(220 20% 97%)",borderRadius:5,opacity:inM?1:.5}}>
+                            <div style={{fontSize:10,fontWeight:700,color:"var(--muted-foreground)",letterSpacing:".04em"}}>{DAYS[i]}</div>
+                            <div style={{fontSize:12,fontWeight:700,color:"var(--foreground)"}}>{dt.getDate()}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Staff rows */}
+                    {activeStaff.map(member=>(
+                      <div key={member.id} style={{display:"grid",gridTemplateColumns:`140px repeat(7,1fr)`,gap:2,marginBottom:2}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 2px"}}>
+                          <div style={{width:22,height:22,borderRadius:"50%",background:member.color||"#6366f1",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,color:"#fff",flexShrink:0}}>{member.avatar}</div>
+                          <span style={{fontSize:11,fontWeight:600,color:"var(--foreground)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{member.name}</span>
+                        </div>
+                        {weekDates.map((dt,di)=>{
+                          const dk=fmtDateKey(dt);
+                          const cellShifts=(shiftsByStaff[member.id]||{})[dk]||[];
+                          const inM=inMonth(dt);
+                          return(
+                            <div key={di} style={{minHeight:42,padding:2,background:inM?"var(--background)":"hsl(220 20% 98%)",border:"1px solid var(--border)",borderRadius:5,opacity:inM?1:.45,display:"flex",flexDirection:"column",gap:2}}>
+                              {cellShifts.map(s=>{
+                                const loc=getLoc(s.locationId);
+                                return(
+                                  <div key={s.uid} style={{background:loc.bg,border:`1px solid ${loc.border}`,borderRadius:4,padding:"2px 4px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:2}}>
+                                    <span style={{fontSize:9,fontWeight:700,color:loc.text,lineHeight:1.3}}>{loc.short}<br/>{s.startTime}–{s.endTime}</span>
+                                    {!isApproved&&<button onClick={()=>removeProposedShift(reviewWeekIdx,s.uid)} style={{background:"none",border:"none",cursor:"pointer",color:loc.text,fontSize:11,lineHeight:1,padding:0,opacity:.7,flexShrink:0}}>×</button>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+
+                    {/* Unfilled row */}
+                    {hasUnfilled&&(
+                      <div style={{display:"grid",gridTemplateColumns:`140px repeat(7,1fr)`,gap:2,marginTop:4}}>
+                        <div style={{display:"flex",alignItems:"center",padding:"4px 2px"}}>
+                          <span style={{fontSize:11,fontWeight:700,color:"var(--destructive)"}}>Unfilled</span>
+                        </div>
+                        {weekDates.map((dt,di)=>{
+                          const dk=fmtDateKey(dt);
+                          const unfSlots=unfilledByDate[dk]||[];
+                          return(
+                            <div key={di} style={{minHeight:42,padding:2,display:"flex",flexDirection:"column",gap:2}}>
+                              {unfSlots.map(s=>{
+                                const loc=getLoc(s.locationId);
+                                if(assigningUid===s.uid&&!isApproved){
+                                  return(
+                                    <select key={s.uid} autoFocus
+                                      onChange={e=>{ if(e.target.value) assignProposedShift(reviewWeekIdx,s.uid,e.target.value); else setAssigningUid(null); }}
+                                      onBlur={()=>setAssigningUid(null)}
+                                      style={{fontSize:10,borderRadius:4,border:"1.5px solid hsl(160 84% 39%)",padding:"2px 4px",fontFamily:"inherit",width:"100%",background:"var(--background)"}}>
+                                      <option value="">— assign —</option>
+                                      {staff.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+                                    </select>
+                                  );
+                                }
+                                return(
+                                  <div key={s.uid} onClick={()=>!isApproved&&setAssigningUid(s.uid)}
+                                    style={{border:`1.5px dashed #ef4444`,borderRadius:4,padding:"2px 4px",cursor:isApproved?"default":"pointer",background:"#FFF5F5",display:"flex",alignItems:"center"}}>
+                                    <span style={{fontSize:9,fontWeight:600,color:"#ef4444",lineHeight:1.3}}>{loc.short}<br/>{s.startTime}–{s.endTime}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Warnings panel */}
+                <div style={{marginBottom:16}}>
+                  {week.warnings.length===0?(
+                    <div style={{background:"#F0FDF4",border:"1px solid #6ee7b7",borderRadius:9,padding:"10px 14px",fontSize:12,color:"#047857",fontWeight:600}}>
+                      No warnings for this week ✓
+                    </div>
+                  ):(
+                    <div style={{background:"#FFFBEB",border:"1px solid #fde68a",borderRadius:9,padding:"12px 14px"}}>
+                      <div style={{fontSize:12,fontWeight:700,color:"#92400e",marginBottom:8}}>Warnings — resolve or approve to continue</div>
+                      {week.warnings.map(w=>{
+                        const checked=!!weekApprovals[w.key];
+                        return(
+                          <label key={w.key} style={{display:"flex",alignItems:"flex-start",gap:8,cursor:"pointer",marginBottom:6,padding:"6px 8px",background:checked?"#FEF3C7":"transparent",borderRadius:6,transition:"background .1s"}}>
+                            <input type="checkbox" checked={checked} onChange={e=>{
+                              setWarningApprovals(prev=>({...prev,[reviewWeekIdx]:{...(prev[reviewWeekIdx]||{}),[w.key]:e.target.checked}}));
+                            }} style={{marginTop:2,accentColor:"#d97706",flexShrink:0}}/>
+                            <span style={{fontSize:12,color:"#92400e"}}>{w.text}</span>
+                            {checked&&<span style={{fontSize:10,fontWeight:700,color:"#d97706",marginLeft:"auto",whiteSpace:"nowrap"}}>Approve anyway</span>}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Full weekends off — month summary */}
+                {proposedRota.staffFullWkndOff&&(
+                  <div style={{marginBottom:16,background:"var(--secondary)",border:"1px solid var(--border)",borderRadius:9,padding:"12px 14px"}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"var(--muted-foreground)",marginBottom:8,letterSpacing:".02em"}}>Full weekends off — {MONTH_NAMES[proposedRota.month]}</div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                      {staff.map(s=>{
+                        const count=proposedRota.staffFullWkndOff?.[s.id]??0;
+                        const ok=count>=1;
+                        return(
+                          <div key={s.id} style={{fontSize:11,padding:"3px 9px",borderRadius:6,background:ok?"#F0FDF4":"#FFF5F5",border:`1px solid ${ok?"#6ee7b7":"#fca5a5"}`,color:ok?"#047857":"#dc2626",fontWeight:500,whiteSpace:"nowrap"}}>
+                            {s.name} — {count} full weekend{count!==1?"s":""} off this month {ok?"✓":"⚠"}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Approve week button */}
+                <button disabled={!canApprove} onClick={()=>approveWeek(reviewWeekIdx)}
+                  style={{width:"100%",background:canApprove?"hsl(160 84% 39%)":isApproved?"var(--secondary)":"var(--secondary)",color:canApprove?"#fff":"var(--muted-foreground)",border:"none",borderRadius:9,padding:"13px",fontSize:14,fontFamily:"inherit",cursor:canApprove?"pointer":"default",fontWeight:700,letterSpacing:".02em",transition:"all .15s"}}>
+                  {isApproved?"Week approved ✓":`Approve week ${reviewWeekIdx+1} and write to rota`}
+                </button>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      {activeTab==="planner"&&!proposedRota&&(
         <div style={{padding:"14px 18px 80px"}}>
           <h2 style={{margin:"0 0 4px",fontSize:17,fontWeight:700}}>Rota Planner</h2>
           <p style={{margin:"0 0 18px",fontSize:12,color:"var(--muted-foreground)"}}>Define shift templates for weekdays and weekends, override specific days, then generate a rota.</p>
@@ -1347,7 +1853,7 @@ export default function RotaSystem() {
 
           {/* Day overrides */}
           <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 4px"}}>Day overrides</h3>
-          <p style={{margin:"0 0 12px",fontSize:12,color:"var(--muted-foreground)"}}>Click a day to create a custom slot list. Click a custom day again to remove the override.</p>
+          <p style={{margin:"0 0 12px",fontSize:12,color:"var(--muted-foreground)"}}>Click a day to create a custom slot list and edit its slots. Use the × button on a custom day to remove the override.</p>
 
           {/* Month/year nav */}
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
@@ -1382,10 +1888,14 @@ export default function RotaSystem() {
                     const isSelected=plannerSelectedDay===dk;
                     return(
                       <div key={dk} onClick={()=>handlePlannerDayClick(dk)}
-                        style={{background:isSelected?"hsl(160 84% 39% / 0.12)":hasOverride?"#FFFBEB":wknd?"hsl(220 20% 97%)":"var(--background)",border:`1.5px solid ${isSelected?"hsl(160 84% 39%)":hasOverride?"#f59e0b":"var(--border)"}`,borderRadius:7,padding:"6px 5px",cursor:"pointer",minHeight:54,display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all .1s"}}>
+                        style={{position:"relative",background:isSelected?"hsl(160 84% 39% / 0.12)":hasOverride?"#FFFBEB":wknd?"hsl(220 20% 97%)":"var(--background)",border:`1.5px solid ${isSelected?"hsl(160 84% 39%)":hasOverride?"#f59e0b":"var(--border)"}`,borderRadius:7,padding:"6px 5px",cursor:"pointer",minHeight:54,display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all .1s"}}>
                         <span style={{fontSize:11,fontWeight:isSelected||hasOverride?700:400,color:isSelected?"hsl(160 84% 25%)":hasOverride?"#92400e":wknd?"var(--muted-foreground)":"var(--foreground)"}}>{day}</span>
                         {hasOverride&&<span style={{fontSize:9,background:"#FEF3C7",color:"#d97706",border:"1px solid #fde68a",borderRadius:4,padding:"1px 4px",fontWeight:700,lineHeight:1.3}}>Custom</span>}
                         {hasOverride&&<span style={{fontSize:9,color:"var(--muted-foreground)"}}>{(planner.overrides[dk]||[]).length}s</span>}
+                        {hasOverride&&(
+                          <button onClick={e=>{ e.stopPropagation(); removePlannerOverride(dk); }}
+                            style={{position:"absolute",top:3,right:3,width:15,height:15,background:"#ef4444",color:"#fff",border:"none",borderRadius:3,cursor:"pointer",fontSize:10,lineHeight:1,padding:0,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>×</button>
+                        )}
                       </div>
                     );
                   })}
@@ -1402,10 +1912,7 @@ export default function RotaSystem() {
                   <span style={{fontSize:13,fontWeight:700}}>Override — {plannerSelectedDay}</span>
                   <span style={{marginLeft:8,fontSize:11,color:"var(--muted-foreground)"}}>Custom slots for this day</span>
                 </div>
-                <button onClick={()=>{
-                  setPlanner(p=>{ const next={...p.overrides}; delete next[plannerSelectedDay]; return {...p,overrides:next}; });
-                  setPlannerSelectedDay(null);
-                }}
+                <button onClick={()=>removePlannerOverride(plannerSelectedDay)}
                   style={{border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
                   Remove override
                 </button>
@@ -1426,15 +1933,10 @@ export default function RotaSystem() {
           )}
 
           {/* Generate button */}
-          {(()=>{
-            const hasSlots=planner.weekdayTemplate.length>0||planner.weekendTemplate.length>0;
-            return(
-              <button disabled={!hasSlots} onClick={()=>showNotif("Rota generation coming in Phase 4!")}
-                style={{width:"100%",background:hasSlots?"hsl(160 84% 39%)":"var(--secondary)",color:hasSlots?"#fff":"var(--muted-foreground)",border:"none",borderRadius:9,padding:"13px",fontSize:14,fontFamily:"inherit",cursor:hasSlots?"pointer":"default",fontWeight:700,letterSpacing:".02em",transition:"all .15s"}}>
-                Generate rota for {MONTH_NAMES[plannerMonth]} {plannerYear}
-              </button>
-            );
-          })()}
+          <button disabled={!hasSlots} onClick={generateRota}
+            style={{width:"100%",background:hasSlots?"hsl(160 84% 39%)":"var(--secondary)",color:hasSlots?"#fff":"var(--muted-foreground)",border:"none",borderRadius:9,padding:"13px",fontSize:14,fontFamily:"inherit",cursor:hasSlots?"pointer":"default",fontWeight:700,letterSpacing:".02em",transition:"all .15s"}}>
+            Generate rota for {MONTH_NAMES[plannerMonth]} {plannerYear}
+          </button>
         </div>
       )}
 
