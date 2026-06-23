@@ -547,6 +547,8 @@ export default function RotaSystem() {
   // ── Phase 4: rota generation ─────────────────────────────────────────────
   function generateRota(){
     const year=plannerYear, month=plannerMonth;
+    const deptId=plannerDept;
+    const deptLabel=departments.find(d=>d.id===deptId)?.label||deptId;
     const tot=daysInMonth(year,month);
     const allShifts=[];
     const assignedDays={}; // staffId -> Set<dateKey>
@@ -591,7 +593,13 @@ export default function RotaSystem() {
     const staffJtId={};
     staff.forEach(s=>{ staffJtId[s.id]=jtLabelToId[(s.role||"").trim().toLowerCase()]||null; });
 
-    staff.forEach((s,idx)=>{
+    // Scope generation to staff in this department only
+    const deptStaff=staff.filter(s=>s.department===deptId);
+    // Coverage rules with a valid jobTitleId (incomplete rules are skipped silently)
+    const deptPlanFull=planner[deptId]||{weekdayTemplate:[],weekendTemplate:[],overrides:{},coverageRules:[]};
+    const activeCoverageRules=deptPlanFull.coverageRules.filter(r=>r.jobTitleId);
+
+    deptStaff.forEach((s,idx)=>{
       assignedDays[s.id]=new Set();
       weekDays[s.id]={};
       weekHrs[s.id]={};
@@ -600,6 +608,58 @@ export default function RotaSystem() {
       staffMonthShifts[s.id]=0;
       staffRotOffset[s.id]=idx%5; // stagger initial offsets 0–4 so different staff prefer different start days
     });
+
+    // Weekend coverage pre-pass: assign coverage slots on Sat/Sun for the whole month
+    // before weekday filling begins. weekDays already reflects the weekend assignment when
+    // Mon–Fri runs, so the 5-day cap naturally limits weekdays to (5 − weekendCovDays),
+    // keeping each staff member's weekly total at ≤ 5 without any special bypass.
+    const weekendCovPreFilled=new Set();
+    if(activeCoverageRules.length>0){
+      for(let d=1;d<=tot;d++){
+        const preDate=new Date(year,month,d);
+        const preDow=preDate.getDay();
+        if(preDow!==6&&preDow!==0) continue;
+        const preDk=fmtDateKey(preDate);
+        const preWeekMon=fmtDateKey(getMondayOf(preDate));
+        const prePlan=planner[deptId]||{weekdayTemplate:[],weekendTemplate:[],overrides:{}};
+        const preRegular=prePlan.overrides[preDk]!==undefined?prePlan.overrides[preDk]:prePlan.weekendTemplate;
+        const preFirst=preRegular[0];
+        activeCoverageRules.forEach(rule=>{
+          for(let ci=0;ci<rule.minPerDay;ci++){
+            const slotId=`cov_${rule.id}_${preDk}_${ci}`;
+            const uid=`${preDk}_${slotId}_0`;
+            const locationId=preFirst?.locationId||locations[0]?.id||"restaurant";
+            const startTime=preFirst?.startTime||"09:00";
+            const endTime=preFirst?.endTime||"17:00";
+            const slotHrs=calcHours(startTime,endTime,0);
+            let eligible=deptStaff.filter(s=>{
+              if(!(s.allowedLocations||[]).includes(locationId)) return false;
+              if(staffJtId[s.id]!==rule.jobTitleId) return false;
+              if((s.absences||{})[preDk]) return false;
+              if(assignedDays[s.id].has(preDk)) return false;
+              return true;
+            });
+            eligible=eligible.slice().sort((a,b)=>{
+              const aW=proposalWknd[a.id]||0,bW=proposalWknd[b.id]||0;
+              if(aW!==bW) return aW-bW;
+              return (staffMonthShifts[a.id]||0)-(staffMonthShifts[b.id]||0);
+            });
+            if(eligible.length>0){
+              const chosen=eligible[0];
+              allShifts.push({uid,date:preDk,locationId,startTime,endTime,staffId:chosen.id,unfilled:false,isCoverageSlot:true});
+              assignedDays[chosen.id].add(preDk);
+              weekDays[chosen.id][preWeekMon]=(weekDays[chosen.id][preWeekMon]||0)+1;
+              weekHrs[chosen.id][preWeekMon]=(weekHrs[chosen.id][preWeekMon]||0)+slotHrs;
+              staffMonthShifts[chosen.id]++;
+              proposalWknd[chosen.id]++;
+            } else {
+              allShifts.push({uid,date:preDk,locationId,startTime,endTime,staffId:null,unfilled:true,isCoverageSlot:true});
+            }
+            weekendCovPreFilled.add(uid);
+          }
+        });
+      }
+    }
 
     for(let d=1;d<=tot;d++){
       const date=new Date(year,month,d);
@@ -613,41 +673,89 @@ export default function RotaSystem() {
       // Fix 2: at each week boundary, advance every staff member's rotation offset by 1
       if(weekMon!==currentWeekMon){
         if(currentWeekMon!==null){
-          staff.forEach(s=>{ staffRotOffset[s.id]=(staffRotOffset[s.id]+1)%5; });
+          deptStaff.forEach(s=>{ staffRotOffset[s.id]=(staffRotOffset[s.id]+1)%5; });
         }
         currentWeekMon=weekMon;
       }
 
       // Saturday: if this is the last complete weekend, force off any staff who
-      // have not yet had a full weekend off this month
+      // have not yet had a full weekend off this month — but only when doing so
+      // still leaves every coverage rule satisfiable on both Sat and Sun.
       if(dow===6){
         forcedOffSatSun.clear();
         const lastWknd=monthWeekends[monthWeekends.length-1];
         if(lastWknd&&lastWknd.satDk===dk){
+          const sunDk=fmtDateKey(addDays(date,1));
+          const candidates=deptStaff.filter(s=>
+            fullWkndCount[s.id]===0&&proposalWknd[s.id]>0&&
+            !assignedDays[s.id].has(dk)&&!assignedDays[s.id].has(sunDk)
+          );
+          // Build forced set greedily: add each candidate only if, after adding them,
+          // every coverage rule they satisfy still has ≥1 other non-forced dept member
+          // who can work on Saturday AND on Sunday (not on absence, not yet forced off).
+          const tentativeForced=new Set();
           const forcedIds=[];
-          staff.forEach(s=>{ if(fullWkndCount[s.id]===0){ forcedOffSatSun.add(s.id); forcedIds.push(s.id); } });
+          candidates.forEach(s=>{
+            tentativeForced.add(s.id);
+            const rulesForS=activeCoverageRules.filter(r=>staffJtId[s.id]===r.jobTitleId);
+            let safe=true;
+            for(const rule of rulesForS){
+              const satOk=deptStaff.some(o=>
+                !tentativeForced.has(o.id)&&
+                staffJtId[o.id]===rule.jobTitleId&&
+                !(o.absences||{})[dk]
+              );
+              const sunOk=deptStaff.some(o=>
+                !tentativeForced.has(o.id)&&
+                staffJtId[o.id]===rule.jobTitleId&&
+                !(o.absences||{})[sunDk]
+              );
+              if(!satOk||!sunOk){ safe=false; break; }
+            }
+            if(safe){
+              forcedIds.push(s.id);
+            } else {
+              tentativeForced.delete(s.id);
+            }
+          });
+          forcedIds.forEach(id=>forcedOffSatSun.add(id));
           if(forcedIds.length>0) forcedWeekendInfo={weekMon,staffIds:new Set(forcedIds)};
         }
       }
 
-      const deptPlan=planner[plannerDept]||{weekdayTemplate:[],weekendTemplate:[],overrides:{}};
-      const slots=deptPlan.overrides[dk]!==undefined
+      const deptPlan=planner[deptId]||{weekdayTemplate:[],weekendTemplate:[],overrides:{}};
+      const regularSlots=deptPlan.overrides[dk]!==undefined
         ?deptPlan.overrides[dk]
         :(isWknd?deptPlan.weekendTemplate:deptPlan.weekdayTemplate);
+      // Synthesise coverage slots — processed first so coverage staff are reserved before regular filling
+      const firstSlot=regularSlots[0];
+      const coverageSlotsToday=activeCoverageRules.flatMap(rule=>
+        Array.from({length:rule.minPerDay},(_,ci)=>({
+          id:`cov_${rule.id}_${dk}_${ci}`,
+          locationId:firstSlot?.locationId||locations[0]?.id||"restaurant",
+          staffCount:1,startTime:firstSlot?.startTime||"09:00",endTime:firstSlot?.endTime||"17:00",
+          allowedJobTitles:[rule.jobTitleId],strict:true,isCoverageSlot:true,
+        }))
+      );
+      const slots=[...coverageSlotsToday,...regularSlots];
 
       slots.forEach(slot=>{
         const need=slot.staffCount||1;
         const slotHrs=calcHours(slot.startTime,slot.endTime,0);
 
         for(let i=0;i<need;i++){
-          let eligible=staff.filter(s=>{
+          const uid=`${dk}_${slot.id}_${i}`;
+          if(weekendCovPreFilled.has(uid)) continue;
+          let eligible=deptStaff.filter(s=>{
             if(!(s.allowedLocations||[]).includes(slot.locationId)) return false;
             if((slot.allowedJobTitles||[]).length>0){
-              // Match via pre-resolved id so label casing/whitespace differences don't matter.
-              // Staff whose role doesn't map to any known title (sJtId===null) are blocked
-              // from role-restricted slots but pass through open slots (length===0 above).
               const sJtId=staffJtId[s.id];
-              if(!slot.allowedJobTitles.includes(sJtId)&&!isSupervisor(s)) return false;
+              // Strict slots: no supervisor fallback — only exact job title match counts
+              if(slot.strict){
+                if(!slot.allowedJobTitles.includes(sJtId)) return false;
+              } else {
+                if(!slot.allowedJobTitles.includes(sJtId)&&!isSupervisor(s)) return false;
+              }
             }
             if((s.absences||{})[dk]) return false;
             if(assignedDays[s.id].has(dk)) return false;
@@ -703,17 +811,16 @@ export default function RotaSystem() {
             return 0;
           });
 
-          const uid=`${dk}_${slot.id}_${i}`;
           if(eligible.length>0){
             const chosen=eligible[0];
-            allShifts.push({uid,date:dk,locationId:slot.locationId,startTime:slot.startTime,endTime:slot.endTime,staffId:chosen.id,unfilled:false});
+            allShifts.push({uid,date:dk,locationId:slot.locationId,startTime:slot.startTime,endTime:slot.endTime,staffId:chosen.id,unfilled:false,isCoverageSlot:!!slot.isCoverageSlot});
             assignedDays[chosen.id].add(dk);
             weekDays[chosen.id][weekMon]=(weekDays[chosen.id][weekMon]||0)+1;
             weekHrs[chosen.id][weekMon]=(weekHrs[chosen.id][weekMon]||0)+slotHrs;
-            staffMonthShifts[chosen.id]++; // Fix 1: increment monthly total
+            staffMonthShifts[chosen.id]++;
             if(isWknd) proposalWknd[chosen.id]++;
           } else {
-            allShifts.push({uid,date:dk,locationId:slot.locationId,startTime:slot.startTime,endTime:slot.endTime,staffId:null,unfilled:true});
+            allShifts.push({uid,date:dk,locationId:slot.locationId,startTime:slot.startTime,endTime:slot.endTime,staffId:null,unfilled:true,isCoverageSlot:!!slot.isCoverageSlot});
           }
         }
       });
@@ -723,7 +830,7 @@ export default function RotaSystem() {
         const satDt=addDays(date,-1);
         if(satDt.getMonth()===month){
           const satDk=fmtDateKey(satDt);
-          staff.forEach(s=>{
+          deptStaff.forEach(s=>{
             if(!assignedDays[s.id].has(satDk)&&!assignedDays[s.id].has(dk))
               fullWkndCount[s.id]++;
           });
@@ -760,7 +867,7 @@ export default function RotaSystem() {
         staffDays[s.staffId].add(s.date);
         staffHrs[s.staffId]=(staffHrs[s.staffId]||0)+calcHours(s.startTime,s.endTime,0);
       });
-      staff.forEach(m=>{
+      deptStaff.forEach(m=>{
         const days=staffDays[m.id]?.size||0;
         if(days>5) warnings.push({key:`over_days_${m.id}`,text:`${m.name} scheduled ${days} days this week (max 5)`});
         const isZeroHrs=(m.contractType||"full_time")==="zero_hours";
@@ -778,9 +885,28 @@ export default function RotaSystem() {
         }
       });
 
-      // Unfilled slots
-      const unfilledCount=weekShifts.filter(s=>s.unfilled).length;
+      // Unfilled regular slots (non-coverage)
+      const unfilledCount=weekShifts.filter(s=>s.unfilled&&!s.isCoverageSlot).length;
       if(unfilledCount>0) warnings.push({key:"unfilled",text:`${unfilledCount} slot${unfilledCount===1?"":"s"} could not be filled automatically`});
+
+      // Unfilled coverage slots — flagged as coverage warnings (amber)
+      const coverageUnfilled=weekShifts.filter(s=>s.unfilled&&s.isCoverageSlot);
+      if(coverageUnfilled.length>0){
+        const byDayTitle={};
+        coverageUnfilled.forEach(s=>{
+          // uid format: "${dk}_cov_${rule.id}_${dk}_${ci}_0"
+          // Extract the matching rule's jobTitleId from activeCoverageRules by matching uid substring
+          const matchedRule=activeCoverageRules.find(r=>s.uid.includes(`cov_${r.id}_`));
+          const jtId=matchedRule?.jobTitleId||"";
+          const bk=`${s.date}||${jtId}`;
+          if(!byDayTitle[bk]) byDayTitle[bk]={date:s.date,jtId,count:0};
+          byDayTitle[bk].count++;
+        });
+        Object.values(byDayTitle).forEach(({date:cd,jtId,count:cnt})=>{
+          const jtLabel=jtSource.find(jt=>jt.id===jtId)?.label||jtId||"Unknown role";
+          warnings.push({key:`coverage_${cd}_${jtId}`,text:`${jtLabel} coverage not met on ${cd} — ${cnt} position${cnt===1?"":"s"} unfilled`,isCoverage:true});
+        });
+      }
 
       // Casual budget (monthly total, attach warning to first week only)
       if(weeks.length===0){
@@ -798,7 +924,7 @@ export default function RotaSystem() {
       ws=addDays(ws,7);
     }
 
-    setProposedRota({year,month,weeks,approved:[],staffFullWkndOff:{...fullWkndCount}});
+    setProposedRota({year,month,deptId,deptLabel,weeks,approved:[],staffFullWkndOff:{...fullWkndCount}});
     setReviewWeekIdx(0);
     setWarningApprovals({});
     setAssigningUid(null);
@@ -1698,7 +1824,7 @@ export default function RotaSystem() {
             <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:8}}>
               <div>
                 <h2 style={{margin:"0 0 2px",fontSize:17,fontWeight:700}}>
-                  Review proposed rota — {MONTH_NAMES[proposedRota.month]} {proposedRota.year}
+                  Review proposed rota — {proposedRota.deptLabel||proposedRota.deptId} — {MONTH_NAMES[proposedRota.month]} {proposedRota.year}
                 </h2>
                 <p style={{margin:0,fontSize:12,color:"var(--muted-foreground)"}}>Approve each week to write shifts to the rota.</p>
               </div>
@@ -1824,8 +1950,8 @@ export default function RotaSystem() {
                                 }
                                 return(
                                   <div key={s.uid} onClick={()=>!isApproved&&setAssigningUid(s.uid)}
-                                    style={{border:`1.5px dashed #ef4444`,borderRadius:4,padding:"2px 4px",cursor:isApproved?"default":"pointer",background:"#FFF5F5",display:"flex",alignItems:"center"}}>
-                                    <span style={{fontSize:9,fontWeight:600,color:"#ef4444",lineHeight:1.3}}>{loc.short}<br/>{s.startTime}–{s.endTime}</span>
+                                    style={{border:`1.5px dashed ${s.isCoverageSlot?"#f59e0b":"#ef4444"}`,borderRadius:4,padding:"2px 4px",cursor:isApproved?"default":"pointer",background:s.isCoverageSlot?"#FFFBEB":"#FFF5F5",display:"flex",alignItems:"center"}}>
+                                    <span style={{fontSize:9,fontWeight:600,color:s.isCoverageSlot?"#92400e":"#ef4444",lineHeight:1.3}}>{loc.short}<br/>{s.startTime}–{s.endTime}</span>
                                   </div>
                                 );
                               })}
@@ -1844,21 +1970,44 @@ export default function RotaSystem() {
                       No warnings for this week ✓
                     </div>
                   ):(
-                    <div style={{background:"#FFFBEB",border:"1px solid #fde68a",borderRadius:9,padding:"12px 14px"}}>
-                      <div style={{fontSize:12,fontWeight:700,color:"#92400e",marginBottom:8}}>Warnings — resolve or approve to continue</div>
-                      {week.warnings.map(w=>{
-                        const checked=!!weekApprovals[w.key];
-                        return(
-                          <label key={w.key} style={{display:"flex",alignItems:"flex-start",gap:8,cursor:"pointer",marginBottom:6,padding:"6px 8px",background:checked?"#FEF3C7":"transparent",borderRadius:6,transition:"background .1s"}}>
-                            <input type="checkbox" checked={checked} onChange={e=>{
-                              setWarningApprovals(prev=>({...prev,[reviewWeekIdx]:{...(prev[reviewWeekIdx]||{}),[w.key]:e.target.checked}}));
-                            }} style={{marginTop:2,accentColor:"#d97706",flexShrink:0}}/>
-                            <span style={{fontSize:12,color:"#92400e"}}>{w.text}</span>
-                            {checked&&<span style={{fontSize:10,fontWeight:700,color:"#d97706",marginLeft:"auto",whiteSpace:"nowrap"}}>Approve anyway</span>}
-                          </label>
-                        );
-                      })}
-                    </div>
+                    <>
+                      {/* Coverage warnings — amber border, shown above regular warnings */}
+                      {week.warnings.filter(w=>w.isCoverage).length>0&&(
+                        <div style={{background:"#FFFBEB",border:"1.5px solid #f59e0b",borderRadius:9,padding:"12px 14px",marginBottom:8}}>
+                          <div style={{fontSize:12,fontWeight:700,color:"#92400e",marginBottom:8}}>Coverage warnings</div>
+                          {week.warnings.filter(w=>w.isCoverage).map(w=>{
+                            const checked=!!weekApprovals[w.key];
+                            return(
+                              <label key={w.key} style={{display:"flex",alignItems:"flex-start",gap:8,cursor:"pointer",marginBottom:6,padding:"6px 8px",background:checked?"#FEF3C7":"transparent",borderRadius:6,transition:"background .1s"}}>
+                                <input type="checkbox" checked={checked} onChange={e=>{
+                                  setWarningApprovals(prev=>({...prev,[reviewWeekIdx]:{...(prev[reviewWeekIdx]||{}),[w.key]:e.target.checked}}));
+                                }} style={{marginTop:2,accentColor:"#f59e0b",flexShrink:0}}/>
+                                <span style={{fontSize:12,color:"#92400e"}}>{w.text}</span>
+                                {checked&&<span style={{fontSize:10,fontWeight:700,color:"#d97706",marginLeft:"auto",whiteSpace:"nowrap"}}>Approve anyway</span>}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {/* Regular warnings */}
+                      {week.warnings.filter(w=>!w.isCoverage).length>0&&(
+                        <div style={{background:"#FFFBEB",border:"1px solid #fde68a",borderRadius:9,padding:"12px 14px"}}>
+                          <div style={{fontSize:12,fontWeight:700,color:"#92400e",marginBottom:8}}>Warnings — resolve or approve to continue</div>
+                          {week.warnings.filter(w=>!w.isCoverage).map(w=>{
+                            const checked=!!weekApprovals[w.key];
+                            return(
+                              <label key={w.key} style={{display:"flex",alignItems:"flex-start",gap:8,cursor:"pointer",marginBottom:6,padding:"6px 8px",background:checked?"#FEF3C7":"transparent",borderRadius:6,transition:"background .1s"}}>
+                                <input type="checkbox" checked={checked} onChange={e=>{
+                                  setWarningApprovals(prev=>({...prev,[reviewWeekIdx]:{...(prev[reviewWeekIdx]||{}),[w.key]:e.target.checked}}));
+                                }} style={{marginTop:2,accentColor:"#d97706",flexShrink:0}}/>
+                                <span style={{fontSize:12,color:"#92400e"}}>{w.text}</span>
+                                {checked&&<span style={{fontSize:10,fontWeight:700,color:"#d97706",marginLeft:"auto",whiteSpace:"nowrap"}}>Approve anyway</span>}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
 
@@ -1867,7 +2016,7 @@ export default function RotaSystem() {
                   <div style={{marginBottom:16,background:"var(--secondary)",border:"1px solid var(--border)",borderRadius:9,padding:"12px 14px"}}>
                     <div style={{fontSize:12,fontWeight:700,color:"var(--muted-foreground)",marginBottom:8,letterSpacing:".02em"}}>Full weekends off — {MONTH_NAMES[proposedRota.month]}</div>
                     <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                      {staff.map(s=>{
+                      {staff.filter(s=>s.department===proposedRota.deptId).map(s=>{
                         const count=proposedRota.staffFullWkndOff?.[s.id]??0;
                         const ok=count>=1;
                         return(
