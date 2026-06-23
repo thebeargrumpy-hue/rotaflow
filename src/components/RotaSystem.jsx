@@ -131,8 +131,19 @@ export default function RotaSystem() {
     return DEFAULT_JOB_TITLES.map(t=>({...t}));
   });
   const [planner, setPlanner] = useState(()=>{
-    try{ const s=localStorage.getItem(PLANNER_KEY); if(s) return {weekdayTemplate:[],weekendTemplate:[],overrides:{},...JSON.parse(s)}; }catch{}
-    return {weekdayTemplate:[],weekendTemplate:[],overrides:{}};
+    try{
+      const s=localStorage.getItem(PLANNER_KEY);
+      if(s){
+        const parsed=JSON.parse(s);
+        // migrate old single-dept format (had top-level weekdayTemplate) → multi-dept
+        if(parsed.weekdayTemplate!==undefined||parsed.weekendTemplate!==undefined){
+          const firstId=DEFAULT_DEPARTMENTS[0]?.id||"foh";
+          return {[firstId]:{weekdayTemplate:parsed.weekdayTemplate||[],weekendTemplate:parsed.weekendTemplate||[],overrides:parsed.overrides||{},coverageRules:[]}};
+        }
+        return parsed;
+      }
+    }catch{}
+    return {};
   });
 
   // ── new state ────────────────────────────────────────────────────────────
@@ -166,6 +177,7 @@ export default function RotaSystem() {
   const [plannerYear,        setPlannerYear]        = useState(()=>new Date().getFullYear());
   const [plannerMonth,       setPlannerMonth]       = useState(()=>new Date().getMonth());
   const [plannerSelectedDay, setPlannerSelectedDay] = useState(null);
+  const [plannerDept,        setPlannerDept]        = useState(()=>departments[0]?.id||"foh");
   const [proposedRota,     setProposedRota]     = useState(null); // generated rota object or null
   const [reviewWeekIdx,    setReviewWeekIdx]    = useState(0);
   const [warningApprovals, setWarningApprovals] = useState({}); // weekIndex -> { warningKey: true }
@@ -285,7 +297,7 @@ export default function RotaSystem() {
   const getLoc   = id  => locations.find(l=>l.id===id)||locations[0];
   const getStype = idx => shiftTypes[idx]||shiftTypes[0];
   const isPublished = weekStarts.every((_,wi)=>publishedWeeks.has(`${weekOffset}-${wi}`));
-  const hasSlots = (planner?.weekdayTemplate?.length ?? 0) > 0 || (planner?.weekendTemplate?.length ?? 0) > 0;
+  const hasSlots = ((planner[plannerDept]?.weekdayTemplate?.length??0)>0)||((planner[plannerDept]?.weekendTemplate?.length??0)>0);
 
   function openShiftModal(staffId,weekIdx,dayIdx){
     const key=`${staffId}-w${weekIdx}-d${dayIdx}`;
@@ -451,50 +463,82 @@ export default function RotaSystem() {
     setJobTitlesDraft(p=>[...p,{id,label:""}]);
   }
 
-  function addPlannerSlot(key){
+  function getDeptPlan(p,deptId){ return p[deptId]||{weekdayTemplate:[],weekendTemplate:[],overrides:{},coverageRules:[]}; }
+
+  function addPlannerSlot(deptId,key){
     const id="slot_"+Date.now();
     const loc=locations[0]?.id||"restaurant";
-    const newSlot={id,locationId:loc,staffCount:1,startTime:"09:00",endTime:"17:00",allowedJobTitles:[]};
+    const newSlot={id,locationId:loc,staffCount:1,startTime:"09:00",endTime:"17:00",allowedJobTitles:[],strict:false};
     setPlanner(p=>{
-      if(key==="weekday") return {...p,weekdayTemplate:[...p.weekdayTemplate,newSlot]};
-      if(key==="weekend") return {...p,weekendTemplate:[...p.weekendTemplate,newSlot]};
-      return {...p,overrides:{...p.overrides,[key]:[...(p.overrides[key]||[]),newSlot]}};
+      const d=getDeptPlan(p,deptId);
+      if(key==="weekday") return {...p,[deptId]:{...d,weekdayTemplate:[...d.weekdayTemplate,newSlot]}};
+      if(key==="weekend") return {...p,[deptId]:{...d,weekendTemplate:[...d.weekendTemplate,newSlot]}};
+      return {...p,[deptId]:{...d,overrides:{...d.overrides,[key]:[...(d.overrides[key]||[]),newSlot]}}};
     });
   }
 
-  function removePlannerSlot(key,slotId){
+  function removePlannerSlot(deptId,key,slotId){
     setPlanner(p=>{
-      if(key==="weekday") return {...p,weekdayTemplate:p.weekdayTemplate.filter(s=>s.id!==slotId)};
-      if(key==="weekend") return {...p,weekendTemplate:p.weekendTemplate.filter(s=>s.id!==slotId)};
-      return {...p,overrides:{...p.overrides,[key]:(p.overrides[key]||[]).filter(s=>s.id!==slotId)}};
+      const d=getDeptPlan(p,deptId);
+      if(key==="weekday") return {...p,[deptId]:{...d,weekdayTemplate:d.weekdayTemplate.filter(s=>s.id!==slotId)}};
+      if(key==="weekend") return {...p,[deptId]:{...d,weekendTemplate:d.weekendTemplate.filter(s=>s.id!==slotId)}};
+      return {...p,[deptId]:{...d,overrides:{...d.overrides,[key]:(d.overrides[key]||[]).filter(s=>s.id!==slotId)}}};
     });
   }
 
-  function updatePlannerSlot(key,slotId,patch){
+  function updatePlannerSlot(deptId,key,slotId,patch){
     setPlanner(p=>{
+      const d=getDeptPlan(p,deptId);
       const upd=arr=>arr.map(s=>s.id===slotId?{...s,...patch}:s);
-      if(key==="weekday") return {...p,weekdayTemplate:upd(p.weekdayTemplate)};
-      if(key==="weekend") return {...p,weekendTemplate:upd(p.weekendTemplate)};
-      return {...p,overrides:{...p.overrides,[key]:upd(p.overrides[key]||[])}};
+      if(key==="weekday") return {...p,[deptId]:{...d,weekdayTemplate:upd(d.weekdayTemplate)}};
+      if(key==="weekend") return {...p,[deptId]:{...d,weekendTemplate:upd(d.weekendTemplate)}};
+      return {...p,[deptId]:{...d,overrides:{...d.overrides,[key]:upd(d.overrides[key]||[])}}};
     });
   }
 
-  function removePlannerOverride(dateKey){
-    setPlanner(p=>{ const next={...p.overrides}; delete next[dateKey]; return {...p,overrides:next}; });
+  function removePlannerOverride(deptId,dateKey){
+    setPlanner(p=>{
+      const d=getDeptPlan(p,deptId);
+      const next={...d.overrides}; delete next[dateKey];
+      return {...p,[deptId]:{...d,overrides:next}};
+    });
     setPlannerSelectedDay(prev=>prev===dateKey?null:prev);
   }
 
-  function handlePlannerDayClick(dateKey){
-    if(planner.overrides[dateKey]!==undefined){
-      // toggle the override editor open/closed; deletion is via the × button on the cell
+  function addCoverageRule(deptId){
+    const id="cr_"+Date.now();
+    setPlanner(p=>{
+      const d=getDeptPlan(p,deptId);
+      return {...p,[deptId]:{...d,coverageRules:[...d.coverageRules,{id,jobTitleId:"",minPerDay:1}]}};
+    });
+  }
+
+  function removeCoverageRule(deptId,ruleId){
+    setPlanner(p=>{
+      const d=getDeptPlan(p,deptId);
+      return {...p,[deptId]:{...d,coverageRules:d.coverageRules.filter(r=>r.id!==ruleId)}};
+    });
+  }
+
+  function updateCoverageRule(deptId,ruleId,patch){
+    setPlanner(p=>{
+      const d=getDeptPlan(p,deptId);
+      return {...p,[deptId]:{...d,coverageRules:d.coverageRules.map(r=>r.id===ruleId?{...r,...patch}:r)}};
+    });
+  }
+
+  function handlePlannerDayClick(deptId,dateKey){
+    const d=getDeptPlan(planner,deptId);
+    if(d.overrides[dateKey]!==undefined){
       setPlannerSelectedDay(plannerSelectedDay===dateKey?null:dateKey);
     } else {
       const [yr,mo,dy]=dateKey.split("-").map(Number);
       const dow=new Date(yr,mo-1,dy).getDay();
       const isWknd=dow===0||dow===6;
       setPlanner(p=>{
-        const template=(isWknd?p.weekendTemplate:p.weekdayTemplate).map((s,i)=>({...s,id:"slot_"+Date.now()+i}));
-        return {...p,overrides:{...p.overrides,[dateKey]:template}};
+        const dp=getDeptPlan(p,deptId);
+        const template=(isWknd?dp.weekendTemplate:dp.weekdayTemplate).map((s,i)=>({...s,id:"slot_"+Date.now()+i}));
+        return {...p,[deptId]:{...dp,overrides:{...dp.overrides,[dateKey]:template}}};
       });
       setPlannerSelectedDay(dateKey);
     }
@@ -586,9 +630,10 @@ export default function RotaSystem() {
         }
       }
 
-      const slots=planner.overrides[dk]!==undefined
-        ?planner.overrides[dk]
-        :(isWknd?planner.weekendTemplate:planner.weekdayTemplate);
+      const deptPlan=planner[plannerDept]||{weekdayTemplate:[],weekendTemplate:[],overrides:{}};
+      const slots=deptPlan.overrides[dk]!==undefined
+        ?deptPlan.overrides[dk]
+        :(isWknd?deptPlan.weekendTemplate:deptPlan.weekdayTemplate);
 
       slots.forEach(slot=>{
         const need=slot.staffCount||1;
@@ -1849,127 +1894,182 @@ export default function RotaSystem() {
       {activeTab==="planner"&&!proposedRota&&(
         <div style={{padding:"14px 18px 80px"}}>
           <h2 style={{margin:"0 0 4px",fontSize:17,fontWeight:700}}>Rota Planner</h2>
-          <p style={{margin:"0 0 18px",fontSize:12,color:"var(--muted-foreground)"}}>Define shift templates for weekdays and weekends, override specific days, then generate a rota.</p>
+          <p style={{margin:"0 0 14px",fontSize:12,color:"var(--muted-foreground)"}}>Define shift templates per department, override specific days, then generate a rota.</p>
 
-          {/* Template sub-tabs */}
-          <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Shift templates</h3>
-          <div style={{display:"flex",gap:2,background:"hsl(220 25% 96%)",borderRadius:8,padding:3,width:"fit-content",marginBottom:14}}>
-            {[["weekday","Weekday (Mon–Fri)"],["weekend","Weekend (Sat–Sun)"]].map(([k,label])=>(
-              <button key={k} onClick={()=>setPlannerTemplateTab(k)}
-                style={{padding:"5px 14px",borderRadius:6,border:"none",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",background:plannerTemplateTab===k?"var(--background)":"transparent",color:plannerTemplateTab===k?"var(--foreground)":"var(--muted-foreground)",boxShadow:plannerTemplateTab===k?"0 1px 3px rgba(0,0,0,.08)":"none",transition:"all .15s"}}>
-                {label}
-              </button>
-            ))}
+          {/* Department tabs */}
+          <div style={{display:"flex",gap:2,marginBottom:20,borderBottom:"2px solid var(--border)",paddingBottom:0}}>
+            {departments.map(dept=>{
+              const dp=planner[dept.id]||{weekdayTemplate:[],weekendTemplate:[],overrides:{},coverageRules:[]};
+              const hasWarning=dp.coverageRules.length>0&&dp.coverageRules.some(r=>!r.jobTitleId);
+              const isActive=plannerDept===dept.id;
+              return(
+                <button key={dept.id} onClick={()=>{ setPlannerDept(dept.id); setPlannerSelectedDay(null); }}
+                  style={{padding:"7px 16px",border:"none",borderBottom:isActive?"2px solid hsl(160 84% 39%)":"2px solid transparent",marginBottom:-2,background:"transparent",fontSize:13,fontWeight:isActive?700:500,cursor:"pointer",fontFamily:"inherit",color:isActive?"hsl(160 84% 25%)":"var(--muted-foreground)",transition:"all .12s",display:"flex",alignItems:"center",gap:5}}>
+                  {dept.label}
+                  {hasWarning&&<span style={{width:7,height:7,borderRadius:"50%",background:"#f59e0b",display:"inline-block",flexShrink:0}}/>}
+                </button>
+              );
+            })}
           </div>
 
-          {/* Template slots */}
           {(()=>{
-            const slots=plannerTemplateTab==="weekday"?planner.weekdayTemplate:planner.weekendTemplate;
-            const editKey=plannerTemplateTab;
+            const dp=planner[plannerDept]||{weekdayTemplate:[],weekendTemplate:[],overrides:{},coverageRules:[]};
+            const deptLabel=departments.find(d=>d.id===plannerDept)?.label||plannerDept;
+
             return(
               <>
-                {slots.length===0&&(
-                  <div style={{fontSize:12,color:"var(--muted-foreground)",padding:"10px 0",marginBottom:6}}>No slots defined yet — add one below.</div>
-                )}
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:12,marginBottom:10}}>
-                  {slots.map(slot=>(
-                    <PlannerSlotCard key={slot.id} slot={slot} editKey={editKey} locations={locations} jobTitles={jobTitles} onUpdate={updatePlannerSlot} onRemove={removePlannerSlot}/>
+                {/* Coverage rules */}
+                <div style={{background:"#FFFBEB",border:"1px solid #fde68a",borderRadius:10,padding:14,marginBottom:20}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:dp.coverageRules.length>0?10:0}}>
+                    <div>
+                      <span style={{fontSize:13,fontWeight:700,color:"#92400e"}}>Coverage rules — {deptLabel}</span>
+                      <span style={{marginLeft:8,fontSize:11,color:"#b45309"}}>Minimum staff per day by job title</span>
+                    </div>
+                    <button onClick={()=>addCoverageRule(plannerDept)}
+                      style={{border:"1.5px solid #d97706",background:"transparent",borderRadius:6,padding:"4px 11px",fontSize:11,cursor:"pointer",fontFamily:"inherit",color:"#92400e",fontWeight:600}}>+ Add rule</button>
+                  </div>
+                  {dp.coverageRules.length===0&&(
+                    <div style={{fontSize:11,color:"#b45309",marginTop:4}}>No coverage rules — add one to enforce minimum staffing by role.</div>
+                  )}
+                  {dp.coverageRules.map(rule=>(
+                    <div key={rule.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                      <select value={rule.jobTitleId} onChange={e=>updateCoverageRule(plannerDept,rule.id,{jobTitleId:e.target.value})}
+                        style={{...IS,flex:1,border:rule.jobTitleId?"1.5px solid #fde68a":"1.5px solid #f59e0b"}}>
+                        <option value="">— select job title —</option>
+                        {jobTitles.map(jt=><option key={jt.id} value={jt.id}>{jt.label}</option>)}
+                      </select>
+                      <span style={{fontSize:11,color:"#92400e",whiteSpace:"nowrap",fontWeight:600}}>min/day</span>
+                      <input type="number" min="1" value={rule.minPerDay}
+                        onChange={e=>updateCoverageRule(plannerDept,rule.id,{minPerDay:Math.max(1,parseInt(e.target.value)||1)})}
+                        style={{...IS,width:56,textAlign:"center",fontFamily:"DM Mono,monospace",border:"1.5px solid #fde68a"}}/>
+                      <button onClick={()=>removeCoverageRule(plannerDept,rule.id)}
+                        style={{background:"none",border:"none",cursor:"pointer",fontSize:16,color:"#d97706",lineHeight:1,padding:0,flexShrink:0}}>×</button>
+                    </div>
                   ))}
                 </div>
-                <button onClick={()=>addPlannerSlot(editKey)}
-                  style={{marginBottom:28,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
-                  + Add slot
+
+                {/* Template sub-tabs */}
+                <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 10px"}}>Shift templates</h3>
+                <div style={{display:"flex",gap:2,background:"hsl(220 25% 96%)",borderRadius:8,padding:3,width:"fit-content",marginBottom:14}}>
+                  {[["weekday","Weekday (Mon–Fri)"],["weekend","Weekend (Sat–Sun)"]].map(([k,label])=>(
+                    <button key={k} onClick={()=>setPlannerTemplateTab(k)}
+                      style={{padding:"5px 14px",borderRadius:6,border:"none",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",background:plannerTemplateTab===k?"var(--background)":"transparent",color:plannerTemplateTab===k?"var(--foreground)":"var(--muted-foreground)",boxShadow:plannerTemplateTab===k?"0 1px 3px rgba(0,0,0,.08)":"none",transition:"all .15s"}}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Template slots */}
+                {(()=>{
+                  const slots=plannerTemplateTab==="weekday"?dp.weekdayTemplate:dp.weekendTemplate;
+                  const editKey=plannerTemplateTab;
+                  return(
+                    <>
+                      {slots.length===0&&(
+                        <div style={{fontSize:12,color:"var(--muted-foreground)",padding:"10px 0",marginBottom:6}}>No slots defined yet — add one below.</div>
+                      )}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:12,marginBottom:10}}>
+                        {slots.map(slot=>(
+                          <PlannerSlotCard key={slot.id} slot={slot} deptId={plannerDept} editKey={editKey} locations={locations} jobTitles={jobTitles} onUpdate={updatePlannerSlot} onRemove={removePlannerSlot}/>
+                        ))}
+                      </div>
+                      <button onClick={()=>addPlannerSlot(plannerDept,editKey)}
+                        style={{marginBottom:28,border:"1.5px dashed var(--border)",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"var(--muted-foreground)",fontWeight:600}}>
+                        + Add slot
+                      </button>
+                    </>
+                  );
+                })()}
+
+                {/* Day overrides */}
+                <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 4px"}}>Day overrides</h3>
+                <p style={{margin:"0 0 12px",fontSize:12,color:"var(--muted-foreground)"}}>Click a day to create a custom slot list. Use the × on a day to remove the override.</p>
+
+                {/* Month/year nav */}
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+                  <button onClick={()=>{ let mo=plannerMonth-1,y=plannerYear; if(mo<0){mo=11;y--;} setPlannerMonth(mo); setPlannerYear(y); }}
+                    style={{background:"none",border:"1px solid var(--border)",borderRadius:6,padding:"4px 9px",cursor:"pointer",fontSize:14,lineHeight:1,color:"var(--muted-foreground)"}}>‹</button>
+                  <span style={{fontSize:14,fontWeight:700,minWidth:160,textAlign:"center"}}>{MONTH_NAMES[plannerMonth]} {plannerYear}</span>
+                  <button onClick={()=>{ let mo=plannerMonth+1,y=plannerYear; if(mo>11){mo=0;y++;} setPlannerMonth(mo); setPlannerYear(y); }}
+                    style={{background:"none",border:"1px solid var(--border)",borderRadius:6,padding:"4px 9px",cursor:"pointer",fontSize:14,lineHeight:1,color:"var(--muted-foreground)"}}>›</button>
+                </div>
+
+                {/* Calendar grid */}
+                {(()=>{
+                  const cy=plannerYear, cm=plannerMonth;
+                  const numDays=daysInMonth(cy,cm);
+                  const offset=firstWeekdayMon(cy,cm);
+                  const padM=String(cm+1).padStart(2,"0");
+                  return(
+                    <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,overflow:"hidden",marginBottom:16}}>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",borderBottom:"1px solid var(--border)",background:"var(--secondary)"}}>
+                        {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(d=>(
+                          <div key={d} style={{textAlign:"center",fontSize:10,fontWeight:700,color:"var(--muted-foreground)",padding:"6px 0",letterSpacing:".04em"}}>{d}</div>
+                        ))}
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4,padding:8}}>
+                        {Array.from({length:offset}).map((_,i)=><div key={"e"+i}/>)}
+                        {Array.from({length:numDays}).map((_,i)=>{
+                          const day=i+1;
+                          const dk=`${cy}-${padM}-${String(day).padStart(2,"0")}`;
+                          const dow=new Date(cy,cm,day).getDay();
+                          const wknd=dow===0||dow===6;
+                          const hasOverride=dp.overrides[dk]!==undefined;
+                          const isSelected=plannerSelectedDay===dk;
+                          return(
+                            <div key={dk} onClick={()=>handlePlannerDayClick(plannerDept,dk)}
+                              style={{position:"relative",background:isSelected?"hsl(160 84% 39% / 0.12)":hasOverride?"#FFFBEB":wknd?"hsl(220 20% 97%)":"var(--background)",border:`1.5px solid ${isSelected?"hsl(160 84% 39%)":hasOverride?"#f59e0b":"var(--border)"}`,borderRadius:7,padding:"6px 5px",cursor:"pointer",minHeight:54,display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all .1s"}}>
+                              <span style={{fontSize:11,fontWeight:isSelected||hasOverride?700:400,color:isSelected?"hsl(160 84% 25%)":hasOverride?"#92400e":wknd?"var(--muted-foreground)":"var(--foreground)"}}>{day}</span>
+                              {hasOverride&&<span style={{fontSize:9,background:"#FEF3C7",color:"#d97706",border:"1px solid #fde68a",borderRadius:4,padding:"1px 4px",fontWeight:700,lineHeight:1.3}}>Custom</span>}
+                              {hasOverride&&<span style={{fontSize:9,color:"var(--muted-foreground)"}}>{(dp.overrides[dk]||[]).length}s</span>}
+                              {hasOverride&&(
+                                <button onClick={e=>{ e.stopPropagation(); removePlannerOverride(plannerDept,dk); }}
+                                  style={{position:"absolute",top:3,right:3,width:15,height:15,background:"#ef4444",color:"#fff",border:"none",borderRadius:3,cursor:"pointer",fontSize:10,lineHeight:1,padding:0,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>×</button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Override slot editor */}
+                {plannerSelectedDay&&dp.overrides[plannerSelectedDay]&&(
+                  <div style={{marginBottom:24,background:"#FFFBEB",border:"1px solid #fde68a",borderRadius:10,padding:14}}>
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+                      <div>
+                        <span style={{fontSize:13,fontWeight:700}}>Override — {plannerSelectedDay}</span>
+                        <span style={{marginLeft:8,fontSize:11,color:"var(--muted-foreground)"}}>Custom slots for this day</span>
+                      </div>
+                      <button onClick={()=>removePlannerOverride(plannerDept,plannerSelectedDay)}
+                        style={{border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
+                        Remove override
+                      </button>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:12,marginBottom:10}}>
+                      {dp.overrides[plannerSelectedDay].map(slot=>(
+                        <PlannerSlotCard key={slot.id} slot={slot} deptId={plannerDept} editKey={plannerSelectedDay} locations={locations} jobTitles={jobTitles} onUpdate={updatePlannerSlot} onRemove={removePlannerSlot}/>
+                      ))}
+                    </div>
+                    {dp.overrides[plannerSelectedDay].length===0&&(
+                      <div style={{fontSize:12,color:"var(--muted-foreground)",marginBottom:10}}>No slots — add one below or remove the override.</div>
+                    )}
+                    <button onClick={()=>addPlannerSlot(plannerDept,plannerSelectedDay)}
+                      style={{border:"1.5px dashed #d97706",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"#92400e",fontWeight:600}}>
+                      + Add slot
+                    </button>
+                  </div>
+                )}
+
+                {/* Generate button */}
+                <button disabled={!hasSlots} onClick={generateRota}
+                  style={{width:"100%",background:hasSlots?"hsl(160 84% 39%)":"var(--secondary)",color:hasSlots?"#fff":"var(--muted-foreground)",border:"none",borderRadius:9,padding:"13px",fontSize:14,fontFamily:"inherit",cursor:hasSlots?"pointer":"default",fontWeight:700,letterSpacing:".02em",transition:"all .15s"}}>
+                  Generate {deptLabel} rota for {MONTH_NAMES[plannerMonth]} {plannerYear}
                 </button>
               </>
             );
           })()}
-
-          {/* Day overrides */}
-          <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 4px"}}>Day overrides</h3>
-          <p style={{margin:"0 0 12px",fontSize:12,color:"var(--muted-foreground)"}}>Click a day to create a custom slot list and edit its slots. Use the × button on a custom day to remove the override.</p>
-
-          {/* Month/year nav */}
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-            <button onClick={()=>{ let mo=plannerMonth-1,y=plannerYear; if(mo<0){mo=11;y--;} setPlannerMonth(mo); setPlannerYear(y); }}
-              style={{background:"none",border:"1px solid var(--border)",borderRadius:6,padding:"4px 9px",cursor:"pointer",fontSize:14,lineHeight:1,color:"var(--muted-foreground)"}}>‹</button>
-            <span style={{fontSize:14,fontWeight:700,minWidth:160,textAlign:"center"}}>{MONTH_NAMES[plannerMonth]} {plannerYear}</span>
-            <button onClick={()=>{ let mo=plannerMonth+1,y=plannerYear; if(mo>11){mo=0;y++;} setPlannerMonth(mo); setPlannerYear(y); }}
-              style={{background:"none",border:"1px solid var(--border)",borderRadius:6,padding:"4px 9px",cursor:"pointer",fontSize:14,lineHeight:1,color:"var(--muted-foreground)"}}>›</button>
-          </div>
-
-          {/* Calendar grid */}
-          {(()=>{
-            const cy=plannerYear, cm=plannerMonth;
-            const numDays=daysInMonth(cy,cm);
-            const offset=firstWeekdayMon(cy,cm);
-            const padM=String(cm+1).padStart(2,"0");
-            return(
-              <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,overflow:"hidden",marginBottom:16}}>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",borderBottom:"1px solid var(--border)",background:"var(--secondary)"}}>
-                  {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(d=>(
-                    <div key={d} style={{textAlign:"center",fontSize:10,fontWeight:700,color:"var(--muted-foreground)",padding:"6px 0",letterSpacing:".04em"}}>{d}</div>
-                  ))}
-                </div>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4,padding:8}}>
-                  {Array.from({length:offset}).map((_,i)=><div key={"e"+i}/>)}
-                  {Array.from({length:numDays}).map((_,i)=>{
-                    const day=i+1;
-                    const dk=`${cy}-${padM}-${String(day).padStart(2,"0")}`;
-                    const dow=new Date(cy,cm,day).getDay();
-                    const wknd=dow===0||dow===6;
-                    const hasOverride=planner.overrides[dk]!==undefined;
-                    const isSelected=plannerSelectedDay===dk;
-                    return(
-                      <div key={dk} onClick={()=>handlePlannerDayClick(dk)}
-                        style={{position:"relative",background:isSelected?"hsl(160 84% 39% / 0.12)":hasOverride?"#FFFBEB":wknd?"hsl(220 20% 97%)":"var(--background)",border:`1.5px solid ${isSelected?"hsl(160 84% 39%)":hasOverride?"#f59e0b":"var(--border)"}`,borderRadius:7,padding:"6px 5px",cursor:"pointer",minHeight:54,display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all .1s"}}>
-                        <span style={{fontSize:11,fontWeight:isSelected||hasOverride?700:400,color:isSelected?"hsl(160 84% 25%)":hasOverride?"#92400e":wknd?"var(--muted-foreground)":"var(--foreground)"}}>{day}</span>
-                        {hasOverride&&<span style={{fontSize:9,background:"#FEF3C7",color:"#d97706",border:"1px solid #fde68a",borderRadius:4,padding:"1px 4px",fontWeight:700,lineHeight:1.3}}>Custom</span>}
-                        {hasOverride&&<span style={{fontSize:9,color:"var(--muted-foreground)"}}>{(planner.overrides[dk]||[]).length}s</span>}
-                        {hasOverride&&(
-                          <button onClick={e=>{ e.stopPropagation(); removePlannerOverride(dk); }}
-                            style={{position:"absolute",top:3,right:3,width:15,height:15,background:"#ef4444",color:"#fff",border:"none",borderRadius:3,cursor:"pointer",fontSize:10,lineHeight:1,padding:0,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>×</button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Override slot editor */}
-          {plannerSelectedDay&&planner.overrides[plannerSelectedDay]&&(
-            <div style={{marginBottom:24,background:"#FFFBEB",border:"1px solid #fde68a",borderRadius:10,padding:14}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-                <div>
-                  <span style={{fontSize:13,fontWeight:700}}>Override — {plannerSelectedDay}</span>
-                  <span style={{marginLeft:8,fontSize:11,color:"var(--muted-foreground)"}}>Custom slots for this day</span>
-                </div>
-                <button onClick={()=>removePlannerOverride(plannerSelectedDay)}
-                  style={{border:"1.5px solid var(--destructive)",background:"#FFF5F5",color:"var(--destructive)",borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
-                  Remove override
-                </button>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:12,marginBottom:10}}>
-                {planner.overrides[plannerSelectedDay].map(slot=>(
-                  <PlannerSlotCard key={slot.id} slot={slot} editKey={plannerSelectedDay} locations={locations} jobTitles={jobTitles} onUpdate={updatePlannerSlot} onRemove={removePlannerSlot}/>
-                ))}
-              </div>
-              {planner.overrides[plannerSelectedDay].length===0&&(
-                <div style={{fontSize:12,color:"var(--muted-foreground)",marginBottom:10}}>No slots — add one below or remove the override.</div>
-              )}
-              <button onClick={()=>addPlannerSlot(plannerSelectedDay)}
-                style={{border:"1.5px dashed #d97706",background:"transparent",borderRadius:8,padding:"8px 18px",fontSize:12,cursor:"pointer",fontFamily:"inherit",color:"#92400e",fontWeight:600}}>
-                + Add slot
-              </button>
-            </div>
-          )}
-
-          {/* Generate button */}
-          <button disabled={!hasSlots} onClick={generateRota}
-            style={{width:"100%",background:hasSlots?"hsl(160 84% 39%)":"var(--secondary)",color:hasSlots?"#fff":"var(--muted-foreground)",border:"none",borderRadius:9,padding:"13px",fontSize:14,fontFamily:"inherit",cursor:hasSlots?"pointer":"default",fontWeight:700,letterSpacing:".02em",transition:"all .15s"}}>
-            Generate rota for {MONTH_NAMES[plannerMonth]} {plannerYear}
-          </button>
         </div>
       )}
 
@@ -2591,23 +2691,23 @@ function ModalHead({ title, sub, onClose }) {
   );
 }
 
-function PlannerSlotCard({ slot, editKey, locations, jobTitles, onUpdate, onRemove }) {
+function PlannerSlotCard({ slot, deptId, editKey, locations, jobTitles, onUpdate, onRemove }) {
   return(
     <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,position:"relative"}}>
-      <button onClick={()=>onRemove(editKey,slot.id)}
+      <button onClick={()=>onRemove(deptId,editKey,slot.id)}
         style={{position:"absolute",top:10,right:10,background:"none",border:"none",cursor:"pointer",fontSize:16,color:"var(--muted-foreground)",lineHeight:1,padding:0}}>×</button>
 
       <div style={{display:"grid",gridTemplateColumns:"1fr 80px",gap:9,marginBottom:9}}>
         <div>
           <label style={FL}>Location</label>
-          <select value={slot.locationId} onChange={e=>onUpdate(editKey,slot.id,{locationId:e.target.value})} style={IS}>
+          <select value={slot.locationId} onChange={e=>onUpdate(deptId,editKey,slot.id,{locationId:e.target.value})} style={IS}>
             {locations.map(l=><option key={l.id} value={l.id}>{l.label}</option>)}
           </select>
         </div>
         <div>
           <label style={FL}>Staff needed</label>
           <input type="number" min="1" value={slot.staffCount}
-            onChange={e=>onUpdate(editKey,slot.id,{staffCount:Math.max(1,parseInt(e.target.value)||1)})}
+            onChange={e=>onUpdate(deptId,editKey,slot.id,{staffCount:Math.max(1,parseInt(e.target.value)||1)})}
             style={{...IS,fontFamily:"DM Mono,monospace"}}/>
         </div>
       </div>
@@ -2616,14 +2716,14 @@ function PlannerSlotCard({ slot, editKey, locations, jobTitles, onUpdate, onRemo
         {[["Start time","startTime"],["End time","endTime"]].map(([lbl,f])=>(
           <div key={f}>
             <label style={FL}>{lbl}</label>
-            <select value={slot[f]} onChange={e=>onUpdate(editKey,slot.id,{[f]:e.target.value})} style={IS}>
+            <select value={slot[f]} onChange={e=>onUpdate(deptId,editKey,slot.id,{[f]:e.target.value})} style={IS}>
               {HALF_HOURS.map(h=><option key={h}>{h}</option>)}
             </select>
           </div>
         ))}
       </div>
 
-      <div>
+      <div style={{marginBottom:10}}>
         <label style={FL}>Allowed job titles</label>
         <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4}}>
           {jobTitles.length===0&&<span style={{fontSize:11,color:"var(--muted-foreground)"}}>No job titles defined yet</span>}
@@ -2633,7 +2733,7 @@ function PlannerSlotCard({ slot, editKey, locations, jobTitles, onUpdate, onRemo
               <button key={jt.id}
                 onClick={()=>{
                   const cur=slot.allowedJobTitles||[];
-                  onUpdate(editKey,slot.id,{allowedJobTitles:active?cur.filter(id=>id!==jt.id):[...cur,jt.id]});
+                  onUpdate(deptId,editKey,slot.id,{allowedJobTitles:active?cur.filter(id=>id!==jt.id):[...cur,jt.id]});
                 }}
                 style={{padding:"3px 9px",borderRadius:6,border:`1.5px solid ${active?"hsl(160 84% 39%)":"var(--border)"}`,background:active?"hsl(160 84% 39% / 0.08)":"var(--background)",color:active?"hsl(160 84% 25%)":"var(--muted-foreground)",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600,transition:"all .12s"}}>
                 {jt.label}
@@ -2641,6 +2741,13 @@ function PlannerSlotCard({ slot, editKey, locations, jobTitles, onUpdate, onRemo
             );
           })}
         </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <button onClick={()=>onUpdate(deptId,editKey,slot.id,{strict:!slot.strict})}
+          style={{width:32,height:18,borderRadius:9,border:"none",cursor:"pointer",background:slot.strict?"#d97706":"var(--border)",position:"relative",transition:"background .15s",flexShrink:0}}>
+          <span style={{position:"absolute",top:2,left:slot.strict?14:2,width:14,height:14,borderRadius:"50%",background:"#fff",transition:"left .15s",display:"block"}}/>
+        </button>
+        <span style={{fontSize:11,fontWeight:600,color:slot.strict?"#92400e":"var(--muted-foreground)"}}>Strict{slot.strict?" — only matched job titles fill this slot":""}</span>
       </div>
     </div>
   );
