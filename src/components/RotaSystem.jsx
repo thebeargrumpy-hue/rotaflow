@@ -510,13 +510,19 @@ export default function RotaSystem() {
     const weekHrs={};      // staffId -> weekMonStr -> hours assigned this week
     const proposalWknd={}; // staffId -> weekend shift count in proposal
 
+    // Fix 1: total shifts assigned this month per staff — primary distribution criterion
+    const staffMonthShifts={}; // staffId -> count of shifts assigned so far this month
+
+    // Fix 2: rotation offset — staggered per staff member, advances by 1 each week so
+    // the preferred starting day shifts forward and no one works the same day block every week.
+    // Values cycle 0–4 (Mon–Fri). The sort uses (offset + todayDayIdx) % 5 as a tiebreaker.
+    const staffRotOffset={}; // staffId -> current week's rotation offset
+    let currentWeekMon=null; // tracks week boundary for advancing offsets
+
     // ── Guaranteed weekend off ───────────────────────────────────────────────
-    // Track how many full weekends (both Sat+Sun off) each staff member has had.
-    // On the last complete weekend of the month, any staff member still at 0 is
-    // forced off both Sat and Sun, leaving those slots unfilled if necessary.
-    const fullWkndCount={};   // staffId -> full weekends off so far this month
-    const forcedOffSatSun=new Set(); // staffIds blocked from the current weekend
-    let forcedWeekendInfo=null; // { weekMon, staffIds } — set when enforcement fires
+    const fullWkndCount={};
+    const forcedOffSatSun=new Set();
+    let forcedWeekendInfo=null;
 
     // Pre-compute complete weekends in the month (both Sat+Sun within the month)
     const monthWeekends=[];
@@ -529,15 +535,26 @@ export default function RotaSystem() {
       }
     }
 
-    // Supervisors/managers can fill any slot as fallback (Fix 5)
+    // Supervisors/managers can fill any slot as fallback
     const isSupervisor=s=>/supervisor|manager|team leader/i.test(s.role||"");
 
-    staff.forEach(s=>{
+    // Build a case-insensitive label→id map from the freshest job titles in localStorage
+    // so that staff.role ("Supervisor") correctly resolves to a job title id ("jt_supervisor").
+    const savedJtRaw=(()=>{ try{ const r=localStorage.getItem(JOB_TITLES_KEY); return r?JSON.parse(r):null; }catch{ return null; } })();
+    const jtSource=savedJtRaw||jobTitles;
+    const jtLabelToId=Object.fromEntries(jtSource.map(jt=>[jt.label.trim().toLowerCase(),jt.id]));
+    // Pre-compute each staff member's resolved job title id (null if role not in list)
+    const staffJtId={};
+    staff.forEach(s=>{ staffJtId[s.id]=jtLabelToId[(s.role||"").trim().toLowerCase()]||null; });
+
+    staff.forEach((s,idx)=>{
       assignedDays[s.id]=new Set();
       weekDays[s.id]={};
       weekHrs[s.id]={};
       proposalWknd[s.id]=0;
       fullWkndCount[s.id]=0;
+      staffMonthShifts[s.id]=0;
+      staffRotOffset[s.id]=idx%5; // stagger initial offsets 0–4 so different staff prefer different start days
     });
 
     for(let d=1;d<=tot;d++){
@@ -548,6 +565,14 @@ export default function RotaSystem() {
       const weekMon=fmtDateKey(getMondayOf(date));
       const dkWdIdx=(dow+6)%7; // 0=Mon…6=Sun
       const prevDk=dkWdIdx>0?fmtDateKey(addDays(date,-1)):null;
+
+      // Fix 2: at each week boundary, advance every staff member's rotation offset by 1
+      if(weekMon!==currentWeekMon){
+        if(currentWeekMon!==null){
+          staff.forEach(s=>{ staffRotOffset[s.id]=(staffRotOffset[s.id]+1)%5; });
+        }
+        currentWeekMon=weekMon;
+      }
 
       // Saturday: if this is the last complete weekend, force off any staff who
       // have not yet had a full weekend off this month
@@ -573,50 +598,53 @@ export default function RotaSystem() {
           let eligible=staff.filter(s=>{
             if(!(s.allowedLocations||[]).includes(slot.locationId)) return false;
             if((slot.allowedJobTitles||[]).length>0){
-              const roleMatch=slot.allowedJobTitles.some(jtId=>{
-                const jt=jobTitles.find(j=>j.id===jtId);
-                return jt&&jt.label===s.role;
-              });
-              // Supervisors/managers can fill any slot as fallback (Fix 5)
-              if(!roleMatch&&!isSupervisor(s)) return false;
+              // Match via pre-resolved id so label casing/whitespace differences don't matter.
+              // Staff whose role doesn't map to any known title (sJtId===null) are blocked
+              // from role-restricted slots but pass through open slots (length===0 above).
+              const sJtId=staffJtId[s.id];
+              if(!slot.allowedJobTitles.includes(sJtId)&&!isSupervisor(s)) return false;
             }
             if((s.absences||{})[dk]) return false;
             if(assignedDays[s.id].has(dk)) return false;
-            // Hard stop at 5 days per calendar week (Bug 2)
             if((weekDays[s.id]?.[weekMon]||0)>=5) return false;
-            // Guaranteed weekend off: block staff forced to take this weekend off
             if(isWknd&&forcedOffSatSun.has(s.id)) return false;
             return true;
           });
 
-          // Sort priority differs for weekend vs weekday slots.
-          // Weekend: month-level weekend fairness is primary so that by end of
-          //   month each eligible staff member has ≤1 difference in weekend days.
-          // Weekday: week-level day-count fairness is primary.
           eligible=eligible.slice().sort((a,b)=>{
-            // 1. Weekend slots: fewest weekend days assigned this month → first
+            // 1. Weekend: fewest weekend days this month first (month-level fairness)
             if(isWknd){
               const aW=proposalWknd[a.id]||0;
               const bW=proposalWknd[b.id]||0;
               if(aW!==bW) return aW-bW;
             }
 
-            // 2. Fewest days assigned this calendar week
+            // 2. Fix 1: fewest total shifts this month → primary distribution criterion.
+            //    Ensures staff with 0 shifts are always picked before those with more,
+            //    spreading load evenly across all eligible staff rather than reusing the same people.
+            const aTot=staffMonthShifts[a.id]||0;
+            const bTot=staffMonthShifts[b.id]||0;
+            if(aTot!==bTot) return aTot-bTot;
+
+            // 3. Fewest days this week → secondary distribution within equal monthly counts
             const aDays=weekDays[a.id]?.[weekMon]||0;
             const bDays=weekDays[b.id]?.[weekMon]||0;
             if(aDays!==bDays) return aDays-bDays;
 
-            // 3. Prefer consecutive working days:
-            //   0 = extending a run (prev day assigned) → best
-            //   1 = starting fresh (no days yet this week)
-            //   2 = would fragment (has days but not yesterday) → worst
+            // 4. Prefer extending a consecutive run over starting fresh
             const aAdj=prevDk?assignedDays[a.id].has(prevDk):false;
             const bAdj=prevDk?assignedDays[b.id].has(prevDk):false;
-            const aConsec=aAdj?0:aDays>0?2:1;
-            const bConsec=bAdj?0:bDays>0?2:1;
-            if(aConsec!==bConsec) return aConsec-bConsec;
+            if(aAdj!==bAdj) return aAdj?-1:1;
 
-            // 4. Most remaining contracted hours this week
+            // 5. Fix 2: rotation tiebreaker — among equally-loaded staff, use
+            //    (rotationOffset + todayDayIdx) % 5 as a rotating priority value.
+            //    Because offset advances each week, Monday priority cycles through
+            //    different staff members week-to-week, shifting working-day blocks.
+            const aRotPri=(staffRotOffset[a.id]+dkWdIdx)%5;
+            const bRotPri=(staffRotOffset[b.id]+dkWdIdx)%5;
+            if(aRotPri!==bRotPri) return aRotPri-bRotPri;
+
+            // 6. Most remaining contracted hours this week
             const aIsZero=(a.contractType||"full_time")==="zero_hours";
             const bIsZero=(b.contractType||"full_time")==="zero_hours";
             if(!aIsZero||!bIsZero){
@@ -625,7 +653,7 @@ export default function RotaSystem() {
               if(Math.abs(aRem-bRem)>0.01) return bRem-aRem;
             }
 
-            // 5. Weekend tiebreak: fewest all-time weekend shifts
+            // 7. Weekend final tiebreak: fewest all-time weekend shifts
             if(isWknd) return (a.weekendsWorked||0)-(b.weekendsWorked||0);
             return 0;
           });
@@ -637,6 +665,7 @@ export default function RotaSystem() {
             assignedDays[chosen.id].add(dk);
             weekDays[chosen.id][weekMon]=(weekDays[chosen.id][weekMon]||0)+1;
             weekHrs[chosen.id][weekMon]=(weekHrs[chosen.id][weekMon]||0)+slotHrs;
+            staffMonthShifts[chosen.id]++; // Fix 1: increment monthly total
             if(isWknd) proposalWknd[chosen.id]++;
           } else {
             allShifts.push({uid,date:dk,locationId:slot.locationId,startTime:slot.startTime,endTime:slot.endTime,staffId:null,unfilled:true});
@@ -644,8 +673,7 @@ export default function RotaSystem() {
         }
       });
 
-      // Sunday: after slots are assigned, count how many staff had both Sat+Sun
-      // free this week (= a full weekend off), then clear the forced-off set
+      // Sunday: after slots are assigned, count full weekends off and clear forced-off set
       if(dow===0){
         const satDt=addDays(date,-1);
         if(satDt.getMonth()===month){
@@ -679,7 +707,7 @@ export default function RotaSystem() {
         });
       }
 
-      // Per-staff: over 5 days / over contracted hours for this week only (Bug 3)
+      // Per-staff warnings
       const staffDays={};
       const staffHrs={};
       weekShifts.filter(s=>!s.unfilled).forEach(s=>{
@@ -690,13 +718,18 @@ export default function RotaSystem() {
       staff.forEach(m=>{
         const days=staffDays[m.id]?.size||0;
         if(days>5) warnings.push({key:`over_days_${m.id}`,text:`${m.name} scheduled ${days} days this week (max 5)`});
-        // Zero-hours staff have no weekly contracted hours cap (Bug 3 / Fix 4)
         const isZeroHrs=(m.contractType||"full_time")==="zero_hours";
         if(!isZeroHrs){
           const hrs=staffHrs[m.id]||0;
           const contracted=m.contracted||40;
-          if(hrs>contracted) warnings.push({key:`over_hrs_${m.id}`,text:`${m.name}: ${hrs.toFixed(1)}h proposed vs ${contracted}h contracted this week`});
-          if(hrs<contracted) warnings.push({key:`under_hrs_${m.id}`,text:`${m.name} is under-hours this week — ${hrs.toFixed(1)}h proposed vs ${contracted}h contracted`});
+          if(days===0){
+            // Fix 3: explicit zero-shifts warning — distinct from general under-hours
+            warnings.push({key:`no_shifts_${m.id}`,text:`${m.name} has 0 shifts this week — check location permissions and slot job titles`});
+          } else if(hrs>contracted){
+            warnings.push({key:`over_hrs_${m.id}`,text:`${m.name}: ${hrs.toFixed(1)}h proposed vs ${contracted}h contracted this week`});
+          } else if(hrs<contracted){
+            warnings.push({key:`under_hrs_${m.id}`,text:`${m.name} is under-hours this week — ${hrs.toFixed(1)}h proposed vs ${contracted}h contracted`});
+          }
         }
       });
 
