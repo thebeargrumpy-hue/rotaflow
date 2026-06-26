@@ -3,9 +3,9 @@ import {
   DAYS, FULL_DAYS, HALF_HOURS,
   LOCATIONS, SHIFT_TYPES, ROLES, VIEW_MODES, STAFF_COLORS, WAGE_RATE,
   INITIAL_STAFF, INITIAL_SHIFTS,
-  loadLocations, loadShiftTypes,
 } from "../constants";
 import { calcHours, getMondayOf, addDays, fmtDate, isWeekend } from "../utils";
+import { supabase } from "../lib/supabase";
 
 const ABSENCE_CODES = [
   { key:"H", label:"Holiday",             color:"#10b981" },
@@ -78,7 +78,7 @@ function migrateStaff(arr) {
   }));
 }
 
-export default function RotaSystem() {
+export default function RotaSystem({ user, userRole }) {
   // ── existing state ───────────────────────────────────────────────────────
   const [activeTab,      setActiveTab]      = useState("rota");
   const [shifts,         setShifts]         = useState(()=>{
@@ -110,10 +110,10 @@ export default function RotaSystem() {
   });
   const [notification,   setNotification]   = useState(null);
   const [sendingEmail,   setSendingEmail]   = useState(false);
-  const [locations,      setLocations]      = useState(loadLocations);
-  const [shiftTypes,     setShiftTypes]     = useState(loadShiftTypes);
-  const [locDraft,       setLocDraft]       = useState(loadLocations);
-  const [stDraft,        setStDraft]        = useState(loadShiftTypes);
+  const [locations,      setLocations]      = useState(()=>JSON.parse(JSON.stringify(LOCATIONS)));
+  const [shiftTypes,     setShiftTypes]     = useState(()=>JSON.parse(JSON.stringify(SHIFT_TYPES)));
+  const [locDraft,       setLocDraft]       = useState(()=>JSON.parse(JSON.stringify(LOCATIONS)));
+  const [stDraft,        setStDraft]        = useState(()=>JSON.parse(JSON.stringify(SHIFT_TYPES)));
   const [casualBudget,      setCasualBudget]      = useState(()=>{
     try{ const s=localStorage.getItem("rotaflow_casual_budget"); if(s) return {...DEFAULT_CASUAL_BUDGET,...JSON.parse(s)}; }catch{}
     return {...DEFAULT_CASUAL_BUDGET};
@@ -147,10 +147,7 @@ export default function RotaSystem() {
   });
 
   // ── new state ────────────────────────────────────────────────────────────
-  const [activeDept,        setActiveDept]        = useState(()=>{
-    try{ const s=localStorage.getItem("rotaflow_departments"); if(s){ const d=JSON.parse(s); return d[0]?.id||"foh"; } }catch{}
-    return "foh";
-  });
+  const [activeDept,        setActiveDept]        = useState("foh");
   const [selectedStaffId,   setSelectedStaffId]   = useState(null);
   const [profileTab,        setProfileTab]        = useState("overview");
   const [editingRowId,      setEditingRowId]      = useState(null);
@@ -165,10 +162,7 @@ export default function RotaSystem() {
   const [editingDividerId,  setEditingDividerId]  = useState(null);
   const [overHoursWarning,  setOverHoursWarning]  = useState(null); // { overBy: number }
   const [casualBudgetWarning, setCasualBudgetWarning] = useState(null); // { overBy: number }
-  const [departments,       setDepartments]       = useState(()=>{
-    try{ const s=localStorage.getItem("rotaflow_departments"); if(s) return JSON.parse(s); }catch{}
-    return DEFAULT_DEPARTMENTS;
-  });
+  const [departments,       setDepartments]       = useState(DEFAULT_DEPARTMENTS);
   const [deptDeleteError,   setDeptDeleteError]   = useState(null); // dept id that can't be deleted
   const [expandedDepts,     setExpandedDepts]     = useState({});
   const [absenceViewYear,   setAbsenceViewYear]   = useState(()=>new Date().getFullYear());
@@ -203,16 +197,31 @@ export default function RotaSystem() {
   useEffect(()=>{ localStorage.setItem("rotaflow-shifts",         JSON.stringify(shifts));              },[shifts]);
   useEffect(()=>{ localStorage.setItem("rotaflow-staff",          JSON.stringify(staff));               },[staff]);
   useEffect(()=>{ localStorage.setItem("rotaflow-publishedWeeks", JSON.stringify([...publishedWeeks])); },[publishedWeeks]);
-  useEffect(()=>{ localStorage.setItem("rf_locations",  JSON.stringify(locations));  },[locations]);
-  useEffect(()=>{ localStorage.setItem("rf_shiftTypes", JSON.stringify(shiftTypes)); },[shiftTypes]);
   useEffect(()=>{
     localStorage.setItem("rotaflow_daily_info", JSON.stringify({ rows:dailyInfoRows, values:dailyInfoValues }));
   },[dailyInfoRows,dailyInfoValues]);
   useEffect(()=>{ localStorage.setItem("rotaflow_dividers",       JSON.stringify(staffDividers)); },[staffDividers]);
-  useEffect(()=>{ localStorage.setItem("rotaflow_departments",    JSON.stringify(departments));  },[departments]);
   useEffect(()=>{ localStorage.setItem("rotaflow_casual_budget",  JSON.stringify(casualBudget)); },[casualBudget]);
   useEffect(()=>{ localStorage.setItem(JOB_TITLES_KEY, JSON.stringify(jobTitles)); },[jobTitles]);
   useEffect(()=>{ localStorage.setItem(PLANNER_KEY,   JSON.stringify(planner));   },[planner]);
+
+  // ── Supabase: fetch departments, locations, shift types on mount ──────────
+  useEffect(()=>{
+    if(!user) return;
+    supabase.from('departments').select('*').order('sort_order').then(({data})=>{
+      if(data&&data.length>0){
+        setDepartments(data);
+        setActiveDept(prev=>data.find(d=>d.id===prev)?prev:data[0].id);
+        setPlannerDept(prev=>data.find(d=>d.id===prev)?prev:data[0].id);
+      }
+    });
+    supabase.from('locations').select('*').order('sort_order').then(({data})=>{
+      if(data&&data.length>0){ setLocations(data); setLocDraft(data); }
+    });
+    supabase.from('shift_types').select('*').order('sort_order').then(({data})=>{
+      if(data&&data.length>0){ setShiftTypes(data); setStDraft(data); }
+    });
+  },[user]);
 
   // ── derived values ───────────────────────────────────────────────────────
   const numWeeks = parseInt(viewWeeks);
@@ -417,11 +426,16 @@ export default function RotaSystem() {
 
   function addDept(){
     const id="dept_"+Date.now();
-    setDepartments(p=>[...p,{id,label:"New Department"}]);
+    setDepartments(p=>{
+      const next=[...p,{id,label:"New Department"}];
+      supabase.from('departments').upsert({id,label:"New Department",sort_order:p.length});
+      return next;
+    });
   }
 
   function renameDept(id,label){
     setDepartments(p=>p.map(d=>d.id===id?{...d,label}:d));
+    supabase.from('departments').upsert({id,label});
   }
 
   function deleteDept(id){
@@ -433,18 +447,38 @@ export default function RotaSystem() {
       return next;
     });
     setStaffDividers(p=>{ const n={...p}; delete n[id]; return n; });
+    supabase.from('departments').delete().eq('id',id);
   }
 
   function moveDept(idx,dir){
+    const target=idx+dir;
+    if(target<0||target>=departments.length) return;
     setDepartments(p=>{
-      const next=[...p], target=idx+dir;
-      if(target<0||target>=next.length) return p;
+      const next=[...p];
       [next[idx],next[target]]=[next[target],next[idx]];
       return next;
     });
+    supabase.from('departments').upsert([
+      {id:departments[idx].id,sort_order:target},
+      {id:departments[target].id,sort_order:idx},
+    ]);
   }
 
-  function saveSettings(){ setLocations([...locDraft]); setShiftTypes([...stDraft]); setCasualBudget({...casualBudgetDraft}); setJobTitles([...jobTitlesDraft]); showNotif("Settings saved ✓"); }
+  async function saveSettings(){
+    const deletedLocIds=locations.filter(l=>!locDraft.find(d=>d.id===l.id)).map(l=>l.id);
+    const deletedStIdxs=shiftTypes.filter(t=>!stDraft.find(d=>d.idx===t.idx)).map(t=>t.idx);
+    setLocations([...locDraft]);
+    setShiftTypes([...stDraft]);
+    setCasualBudget({...casualBudgetDraft});
+    setJobTitles([...jobTitlesDraft]);
+    if(deletedLocIds.length>0){ const {error}=await supabase.from('locations').delete().in('id',deletedLocIds); if(error) console.error('Location delete error:',error); }
+    const {error:locUpsertErr}=await supabase.from('locations').upsert(locDraft.map((l,i)=>({...l,sort_order:i})));
+    if(locUpsertErr) console.error('Location upsert error:',locUpsertErr);
+    if(deletedStIdxs.length>0){ const {error}=await supabase.from('shift_types').delete().in('idx',deletedStIdxs); if(error) console.error('Shift type delete error:',error); }
+    const {error:stUpsertErr}=await supabase.from('shift_types').upsert(stDraft.map((t,i)=>({...t,sort_order:i})));
+    if(stUpsertErr) console.error('Shift type upsert error:',stUpsertErr);
+    showNotif("Settings saved ✓");
+  }
 
   function addLocation(){
     const id="loc_"+Date.now();
