@@ -81,17 +81,8 @@ function migrateStaff(arr) {
 export default function RotaSystem({ user, userRole }) {
   // ── existing state ───────────────────────────────────────────────────────
   const [activeTab,      setActiveTab]      = useState("rota");
-  const [shifts,         setShifts]         = useState(()=>{
-    try { const s=localStorage.getItem("rotaflow-shifts"); return s?JSON.parse(s):INITIAL_SHIFTS; }
-    catch { return INITIAL_SHIFTS; }
-  });
-  const [staff,          setStaff]          = useState(()=>{
-    try {
-      const s=localStorage.getItem("rotaflow-staff");
-      return s?migrateStaff(JSON.parse(s)):migrateStaff(INITIAL_STAFF);
-    }
-    catch { return migrateStaff(INITIAL_STAFF); }
-  });
+  const [shifts,         setShifts]         = useState({});
+  const [staff,          setStaff]          = useState([]);
   const [weekOffset,     setWeekOffset]     = useState(0);
   const [viewWeeks,      setViewWeeks]      = useState("1");
   const [selectedCell,   setSelectedCell]   = useState(null);
@@ -104,10 +95,7 @@ export default function RotaSystem({ user, userRole }) {
     return {name:"",role:DEFAULT_JOB_TITLES[0].label,contracted:37.5,email:"",department:"foh"};
   });
   const [filterRole,     setFilterRole]     = useState("All");
-  const [publishedWeeks, setPublishedWeeks] = useState(()=>{
-    try { const s=localStorage.getItem("rotaflow-publishedWeeks"); return s?new Set(JSON.parse(s)):new Set(); }
-    catch { return new Set(); }
-  });
+  const [publishedWeeks, setPublishedWeeks] = useState(new Set());
   const [notification,   setNotification]   = useState(null);
   const [sendingEmail,   setSendingEmail]   = useState(false);
   const [locations,      setLocations]      = useState(()=>JSON.parse(JSON.stringify(LOCATIONS)));
@@ -155,10 +143,7 @@ export default function RotaSystem({ user, userRole }) {
   const [absenceModal,      setAbsenceModal]      = useState(null); // { staffId, dateKey, code }
   const [shiftModalTab,     setShiftModalTab]     = useState("shift"); // "shift"|"absence"
   const [absencePickerCode, setAbsencePickerCode] = useState("H");
-  const [staffDividers,     setStaffDividers]     = useState(()=>{
-    try{ const s=localStorage.getItem("rotaflow_dividers"); if(s) return JSON.parse(s); }catch{}
-    return {};
-  });
+  const [staffDividers,     setStaffDividers]     = useState({});
   const [editingDividerId,  setEditingDividerId]  = useState(null);
   const [overHoursWarning,  setOverHoursWarning]  = useState(null); // { overBy: number }
   const [casualBudgetWarning, setCasualBudgetWarning] = useState(null); // { overBy: number }
@@ -177,35 +162,48 @@ export default function RotaSystem({ user, userRole }) {
   const [warningApprovals, setWarningApprovals] = useState({}); // weekIndex -> { warningKey: true }
   const [assigningUid,     setAssigningUid]     = useState(null); // uid of unfilled slot being assigned
   const profileViewYear = new Date().getFullYear();
+  const dataLoadedRef = useRef(false);
 
-  const [dailyInfoRows,   setDailyInfoRows]   = useState(()=>{
-    try {
-      const s=localStorage.getItem("rotaflow_daily_info");
-      if(s){ const d=JSON.parse(s); return d.rows||DEFAULT_DAILY_INFO_ROWS; }
-    } catch {}
-    return DEFAULT_DAILY_INFO_ROWS;
-  });
-  const [dailyInfoValues, setDailyInfoValues] = useState(()=>{
-    try {
-      const s=localStorage.getItem("rotaflow_daily_info");
-      if(s){ const d=JSON.parse(s); return d.values||{}; }
-    } catch {}
-    return {};
-  });
+  const [dailyInfoRows,   setDailyInfoRows]   = useState(DEFAULT_DAILY_INFO_ROWS);
+  const [dailyInfoValues, setDailyInfoValues] = useState({});
 
   // ── persistence ──────────────────────────────────────────────────────────
-  useEffect(()=>{ localStorage.setItem("rotaflow-shifts",         JSON.stringify(shifts));              },[shifts]);
-  useEffect(()=>{ localStorage.setItem("rotaflow-staff",          JSON.stringify(staff));               },[staff]);
-  useEffect(()=>{ localStorage.setItem("rotaflow-publishedWeeks", JSON.stringify([...publishedWeeks])); },[publishedWeeks]);
   useEffect(()=>{
-    localStorage.setItem("rotaflow_daily_info", JSON.stringify({ rows:dailyInfoRows, values:dailyInfoValues }));
-  },[dailyInfoRows,dailyInfoValues]);
-  useEffect(()=>{ localStorage.setItem("rotaflow_dividers",       JSON.stringify(staffDividers)); },[staffDividers]);
+    if(!user||!dataLoadedRef.current||staff.length===0) return;
+    supabase.from('staff').upsert(staff.map(s=>({id:String(s.id),data:s})));
+  },[staff,user]);
+  useEffect(()=>{
+    if(!user||!dataLoadedRef.current||Object.keys(shifts).length===0) return;
+    const byWeek={};
+    Object.entries(shifts).forEach(([key,val])=>{
+      const m=key.match(/^(.+)-w(-?\d+)-d(\d+)$/); if(!m) return;
+      const wkKey=fmtDateKey(addDays(baseMonday,parseInt(m[2])*7));
+      if(!byWeek[wkKey]) byWeek[wkKey]={};
+      byWeek[wkKey][key]=val;
+    });
+    supabase.from('shifts').upsert(Object.entries(byWeek).map(([id,data])=>({id,data})));
+  },[shifts,user]);
+  useEffect(()=>{
+    if(!user||!dataLoadedRef.current) return;
+    supabase.from('published_weeks').upsert([...publishedWeeks].map(id=>({id,data:{}})));
+  },[publishedWeeks,user]);
+  useEffect(()=>{
+    if(!user||!dataLoadedRef.current) return;
+    supabase.from('daily_info').upsert({id:'rows',data:dailyInfoRows});
+  },[dailyInfoRows,user]);
+  useEffect(()=>{
+    if(!user||!dataLoadedRef.current) return;
+    supabase.from('daily_info').upsert({id:'values',data:dailyInfoValues});
+  },[dailyInfoValues,user]);
+  useEffect(()=>{
+    if(!user||!dataLoadedRef.current) return;
+    supabase.from('dividers').upsert(Object.entries(staffDividers).map(([id,data])=>({id,data})));
+  },[staffDividers,user]);
   useEffect(()=>{ localStorage.setItem("rotaflow_casual_budget",  JSON.stringify(casualBudget)); },[casualBudget]);
   useEffect(()=>{ localStorage.setItem(JOB_TITLES_KEY, JSON.stringify(jobTitles)); },[jobTitles]);
   useEffect(()=>{ localStorage.setItem(PLANNER_KEY,   JSON.stringify(planner));   },[planner]);
 
-  // ── Supabase: fetch departments, locations, shift types on mount ──────────
+  // ── Supabase: fetch all data on mount ────────────────────────────────────
   useEffect(()=>{
     if(!user) return;
     supabase.from('departments').select('*').order('sort_order').then(({data})=>{
@@ -221,6 +219,31 @@ export default function RotaSystem({ user, userRole }) {
     supabase.from('shift_types').select('*').order('sort_order').then(({data})=>{
       if(data&&data.length>0){ setShiftTypes(data); setStDraft(data); }
     });
+    supabase.from('staff').select('*').then(({data})=>{
+      if(data&&data.length>0){ setStaff(migrateStaff(data.map(row=>({id:row.id,...row.data})))); }
+    });
+    supabase.from('shifts').select('*').then(({data})=>{
+      if(data&&data.length>0){
+        const merged={};
+        data.forEach(row=>{ if(row.data) Object.assign(merged,row.data); });
+        setShifts(merged);
+      }
+    });
+    supabase.from('published_weeks').select('id').then(({data})=>{
+      if(data&&data.length>0){ setPublishedWeeks(new Set(data.map(row=>row.id))); }
+    });
+    supabase.from('daily_info').select('*').then(({data})=>{
+      if(data&&data.length>0){
+        const rowsRow=data.find(r=>r.id==='rows');
+        const valuesRow=data.find(r=>r.id==='values');
+        if(rowsRow?.data) setDailyInfoRows(rowsRow.data);
+        if(valuesRow?.data) setDailyInfoValues(valuesRow.data);
+      }
+    });
+    supabase.from('dividers').select('*').then(({data})=>{
+      if(data&&data.length>0){ setStaffDividers(Object.fromEntries(data.map(row=>[row.id,row.data]))); }
+    });
+    dataLoadedRef.current=true;
   },[user]);
 
   // ── derived values ───────────────────────────────────────────────────────
@@ -382,11 +405,13 @@ export default function RotaSystem({ user, userRole }) {
     if(!newStaff.name.trim()) return;
     const id=Date.now(), initials=newStaff.name.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
     const contracted=Number(newStaff.contracted);
-    setStaff(p=>[...p,{
+    const newMember={
       id, name:newStaff.name, role:newStaff.role, email:newStaff.email, avatar:initials,
-      contracted, color:STAFF_COLORS[p.length%STAFF_COLORS.length], weekendsWorked:0,
+      contracted, color:STAFF_COLORS[staff.length%STAFF_COLORS.length], weekendsWorked:0,
       annualHolidayDays:28, annualisedHours:contracted*52, absences:{}, department:newStaff.department||departments[0]?.id||"foh",
-    }]);
+    };
+    setStaff(p=>[...p,newMember]);
+    supabase.from('staff').upsert({id:String(id),data:{id,name:newStaff.name,role:newStaff.role,email:newStaff.email,avatar:initials,contracted,color:STAFF_COLORS[staff.length%STAFF_COLORS.length],weekendsWorked:0,annualHolidayDays:28,annualisedHours:contracted*52,absences:{},department:newStaff.department||departments[0]?.id||"foh"}});
     setNewStaff({name:"",role:jobTitles[0]?.label||"",contracted:37.5,email:"",department:departments[0]?.id||"foh"});
     setShowStaffModal(false); showNotif("Staff member added ✓");
   }
@@ -394,6 +419,7 @@ export default function RotaSystem({ user, userRole }) {
   function removeStaff(id){
     setStaff(p=>p.filter(s=>s.id!==id));
     setShifts(p=>{const n={...p};Object.keys(n).forEach(k=>{if(k.startsWith(`${id}-`))delete n[k];});return n;});
+    supabase.from('staff').delete().eq('id',String(id));
     if(selectedStaffId===id){ setSelectedStaffId(null); setAbsencePickerDate(null); }
   }
 
