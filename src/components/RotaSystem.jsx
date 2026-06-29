@@ -74,6 +74,7 @@ function migrateStaff(arr) {
     department:        "foh",
     contractType:      "full_time",
     allowedLocations:  [],
+    maxDaysPerWeek:    5,
     ...s,
   }));
 }
@@ -91,8 +92,8 @@ export default function RotaSystem({ user, userRole }) {
   const [showSendModal,  setShowSendModal]  = useState(false);
   const [shiftEdit,      setShiftEdit]      = useState({ start:"09:00", end:"17:00", typeIdx:0, locationId:"restaurant", brk:30 });
   const [newStaff,       setNewStaff]       = useState(()=>{
-    try{ const s=localStorage.getItem(JOB_TITLES_KEY); if(s){ const ts=JSON.parse(s); if(ts.length) return {name:"",role:ts[0].label,contracted:37.5,email:"",department:"foh"}; } }catch{}
-    return {name:"",role:DEFAULT_JOB_TITLES[0].label,contracted:37.5,email:"",department:"foh"};
+    try{ const s=localStorage.getItem(JOB_TITLES_KEY); if(s){ const ts=JSON.parse(s); if(ts.length) return {name:"",role:ts[0].label,contracted:37.5,email:"",department:"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950}; } }catch{}
+    return {name:"",role:DEFAULT_JOB_TITLES[0].label,contracted:37.5,email:"",department:"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950};
   });
   const [filterRole,     setFilterRole]     = useState("All");
   const [publishedWeeks, setPublishedWeeks] = useState(new Set());
@@ -162,18 +163,12 @@ export default function RotaSystem({ user, userRole }) {
   const [warningApprovals, setWarningApprovals] = useState({}); // weekIndex -> { warningKey: true }
   const [assigningUid,     setAssigningUid]     = useState(null); // uid of unfilled slot being assigned
   const profileViewYear = new Date().getFullYear();
-  const dataLoadedRef = useRef(false);
-
   const [dailyInfoRows,   setDailyInfoRows]   = useState(DEFAULT_DAILY_INFO_ROWS);
   const [dailyInfoValues, setDailyInfoValues] = useState({});
 
   // ── persistence ──────────────────────────────────────────────────────────
   useEffect(()=>{
-    if(!user||!dataLoadedRef.current||staff.length===0) return;
-    supabase.from('staff').upsert(staff.map(s=>({id:String(s.id),data:s})));
-  },[staff,user]);
-  useEffect(()=>{
-    if(!user||!dataLoadedRef.current||Object.keys(shifts).length===0) return;
+    if(!user||Object.keys(shifts).length===0) return;
     const byWeek={};
     Object.entries(shifts).forEach(([key,val])=>{
       const m=key.match(/^(.+)-w(-?\d+)-d(\d+)$/); if(!m) return;
@@ -184,19 +179,19 @@ export default function RotaSystem({ user, userRole }) {
     supabase.from('shifts').upsert(Object.entries(byWeek).map(([id,data])=>({id,data})));
   },[shifts,user]);
   useEffect(()=>{
-    if(!user||!dataLoadedRef.current) return;
+    if(!user) return;
     supabase.from('published_weeks').upsert([...publishedWeeks].map(id=>({id,data:{}})));
   },[publishedWeeks,user]);
   useEffect(()=>{
-    if(!user||!dataLoadedRef.current) return;
+    if(!user) return;
     supabase.from('daily_info').upsert({id:'rows',data:dailyInfoRows});
   },[dailyInfoRows,user]);
   useEffect(()=>{
-    if(!user||!dataLoadedRef.current) return;
+    if(!user) return;
     supabase.from('daily_info').upsert({id:'values',data:dailyInfoValues});
   },[dailyInfoValues,user]);
   useEffect(()=>{
-    if(!user||!dataLoadedRef.current) return;
+    if(!user) return;
     supabase.from('dividers').upsert(Object.entries(staffDividers).map(([id,data])=>({id,data})));
   },[staffDividers,user]);
   useEffect(()=>{ localStorage.setItem("rotaflow_casual_budget",  JSON.stringify(casualBudget)); },[casualBudget]);
@@ -243,7 +238,6 @@ export default function RotaSystem({ user, userRole }) {
     supabase.from('dividers').select('*').then(({data})=>{
       if(data&&data.length>0){ setStaffDividers(Object.fromEntries(data.map(row=>[row.id,row.data]))); }
     });
-    dataLoadedRef.current=true;
   },[user]);
 
   // ── derived values ───────────────────────────────────────────────────────
@@ -401,18 +395,23 @@ export default function RotaSystem({ user, userRole }) {
     setShowShiftModal(false); showNotif("Shift removed");
   }
 
-  function addStaff(){
+  async function addStaff(){
     if(!newStaff.name.trim()) return;
     const id=Date.now(), initials=newStaff.name.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
     const contracted=Number(newStaff.contracted);
     const newMember={
       id, name:newStaff.name, role:newStaff.role, email:newStaff.email, avatar:initials,
       contracted, color:STAFF_COLORS[staff.length%STAFF_COLORS.length], weekendsWorked:0,
-      annualHolidayDays:28, annualisedHours:contracted*52, absences:{}, department:newStaff.department||departments[0]?.id||"foh",
+      annualHolidayDays:Number(newStaff.annualHolidayDays)||28,
+      annualisedHours:Number(newStaff.annualisedHours)||contracted*52,
+      absences:{}, department:newStaff.department||departments[0]?.id||"foh",
+      contractType:newStaff.contractType||"full_time",
+      maxDaysPerWeek:Number(newStaff.maxDaysPerWeek)||5,
+      allowedLocations:[],
     };
+    await supabase.from('staff').upsert({id:String(id),data:newMember});
     setStaff(p=>[...p,newMember]);
-    supabase.from('staff').upsert({id:String(id),data:{id,name:newStaff.name,role:newStaff.role,email:newStaff.email,avatar:initials,contracted,color:STAFF_COLORS[staff.length%STAFF_COLORS.length],weekendsWorked:0,annualHolidayDays:28,annualisedHours:contracted*52,absences:{},department:newStaff.department||departments[0]?.id||"foh"}});
-    setNewStaff({name:"",role:jobTitles[0]?.label||"",contracted:37.5,email:"",department:departments[0]?.id||"foh"});
+    setNewStaff({name:"",role:jobTitles[0]?.label||"",contracted:37.5,email:"",department:departments[0]?.id||"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950});
     setShowStaffModal(false); showNotif("Staff member added ✓");
   }
 
@@ -819,7 +818,8 @@ export default function RotaSystem({ user, userRole }) {
             }
             if((s.absences||{})[dk]) return false;
             if(assignedDays[s.id].has(dk)) return false;
-            if((weekDays[s.id]?.[weekMon]||0)>=5) return false;
+            const isZeroHrs=(s.contractType||"full_time")==="zero_hours";
+            if(!isZeroHrs&&(weekDays[s.id]?.[weekMon]||0)>=(s.maxDaysPerWeek||5)) return false;
             if(isWknd&&forcedOffSatSun.has(s.id)) return false;
             return true;
           });
@@ -857,9 +857,10 @@ export default function RotaSystem({ user, userRole }) {
             const bRotPri=(staffRotOffset[b.id]+dkWdIdx)%5;
             if(aRotPri!==bRotPri) return aRotPri-bRotPri;
 
-            // 6. Most remaining contracted hours this week
+            // 6. Contracted staff before zero hours; then most remaining hours
             const aIsZero=(a.contractType||"full_time")==="zero_hours";
             const bIsZero=(b.contractType||"full_time")==="zero_hours";
+            if(aIsZero!==bIsZero) return aIsZero?1:-1;
             if(!aIsZero||!bIsZero){
               const aRem=(a.contracted||40)-(weekHrs[a.id]?.[weekMon]||0);
               const bRem=(b.contracted||40)-(weekHrs[b.id]?.[weekMon]||0);
@@ -1614,6 +1615,12 @@ export default function RotaSystem({ user, userRole }) {
                           <option value="zero_hours">Zero Hours / Casual</option>
                         </select>
                       </div>
+                      {member.contractType!=="zero_hours"&&(
+                        <div>
+                          <label style={FL}>Max days/week</label>
+                          <input type="number" min="1" max="7" value={member.maxDaysPerWeek??5} onChange={e=>updateStaffField(member.id,{maxDaysPerWeek:Number(e.target.value)||5})} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+                        </div>
+                      )}
                     </div>
 
                     {/* Allowed locations */}
@@ -2807,7 +2814,7 @@ export default function RotaSystem({ user, userRole }) {
         <Backdrop onClose={()=>setShowStaffModal(false)}>
           <ModalHead title="Add Staff Member" onClose={()=>setShowStaffModal(false)}/>
           <div style={{padding:16}}>
-            {[["Full Name","name","text","e.g. Jamie Oliver"],["Email Address","email","email","e.g. jamie@nma.org.uk"],["Contracted Hrs/Week","contracted","number","e.g. 37.5"]].map(([lbl,field,type,ph])=>(
+            {[["Full Name","name","text","e.g. Jamie Oliver"],["Email Address","email","email","e.g. jamie@nma.org.uk"]].map(([lbl,field,type,ph])=>(
               <div key={field} style={{marginBottom:11}}>
                 <label style={FL}>{lbl}</label>
                 <input type={type} placeholder={ph} value={newStaff[field]} onChange={e=>setNewStaff(p=>({...p,[field]:e.target.value}))} style={{...IS,width:"100%",boxSizing:"border-box"}}/>
@@ -2819,11 +2826,41 @@ export default function RotaSystem({ user, userRole }) {
                 {jobTitles.map(jt=><option key={jt.id} value={jt.label}>{jt.label}</option>)}
               </select>
             </div>
-            <div style={{marginBottom:14}}>
+            <div style={{marginBottom:11}}>
               <label style={FL}>Department</label>
               <select value={newStaff.department||departments[0]?.id||""} onChange={e=>setNewStaff(p=>({...p,department:e.target.value}))} style={IS}>
                 {departments.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
               </select>
+            </div>
+            <div style={{marginBottom:11}}>
+              <label style={FL}>Contract Type</label>
+              <select value={newStaff.contractType||"full_time"} onChange={e=>setNewStaff(p=>({...p,contractType:e.target.value,maxDaysPerWeek:e.target.value==="zero_hours"?0:p.maxDaysPerWeek}))} style={IS}>
+                <option value="full_time">Full Time</option>
+                <option value="part_time">Part Time</option>
+                <option value="zero_hours">Zero Hours / Casual</option>
+              </select>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:11}}>
+              <div>
+                <label style={FL}>Contracted hrs/week</label>
+                <input type="number" value={newStaff.contracted} onChange={e=>setNewStaff(p=>({...p,contracted:e.target.value,annualisedHours:Number(e.target.value)*52}))} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+              </div>
+              {newStaff.contractType!=="zero_hours"&&(
+                <div>
+                  <label style={FL}>Max days/week</label>
+                  <input type="number" min="1" max="7" value={newStaff.maxDaysPerWeek} onChange={e=>setNewStaff(p=>({...p,maxDaysPerWeek:Number(e.target.value)||5}))} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+                </div>
+              )}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:14}}>
+              <div>
+                <label style={FL}>Annual holiday (days)</label>
+                <input type="number" value={newStaff.annualHolidayDays} onChange={e=>setNewStaff(p=>({...p,annualHolidayDays:Number(e.target.value)||28}))} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+              </div>
+              <div>
+                <label style={FL}>Annualised hours</label>
+                <input type="number" value={newStaff.annualisedHours} onChange={e=>setNewStaff(p=>({...p,annualisedHours:Number(e.target.value)||0}))} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+              </div>
             </div>
             <button onClick={addStaff} style={{width:"100%",background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"10px",fontSize:13,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>Add Staff Member</button>
           </div>
