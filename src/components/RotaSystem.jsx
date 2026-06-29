@@ -1034,17 +1034,23 @@ export default function RotaSystem({ user, userRole }) {
   }
 
   // ── new helpers ──────────────────────────────────────────────────────────
-  function updateStaffField(id,patch){
-    setStaff(p=>p.map(s=>s.id===id?{...s,...patch}:s));
+  async function updateStaffField(id,patch){
+    const updatedStaff=staff.map(s=>s.id===id?{...s,...patch}:s);
+    const member=updatedStaff.find(s=>s.id===id);
+    setStaff(updatedStaff);
+    await supabase.from('staff').upsert({id:String(id),data:member});
   }
 
-  function setAbsenceCode(memberId,key,code){
-    setStaff(p=>p.map(s=>{
+  async function setAbsenceCode(memberId,key,code){
+    const updatedStaff=staff.map(s=>{
       if(s.id!==memberId) return s;
       const absences={...(s.absences||{})};
       if(code===null) delete absences[key]; else absences[key]=code;
       return {...s,absences};
-    }));
+    });
+    const member=updatedStaff.find(s=>s.id===memberId);
+    setStaff(updatedStaff);
+    await supabase.from('staff').upsert({id:String(memberId),data:member});
   }
 
   function addDailyInfoRow(){
