@@ -75,6 +75,7 @@ function migrateStaff(arr) {
     contractType:      "full_time",
     allowedLocations:  [],
     maxDaysPerWeek:    5,
+    allowedDays:       ["mon","tue","wed","thu","fri","sat","sun"],
     ...s,
   }));
 }
@@ -89,11 +90,12 @@ export default function RotaSystem({ user, userRole }) {
   const [selectedCell,   setSelectedCell]   = useState(null);
   const [showShiftModal, setShowShiftModal] = useState(false);
   const [showStaffModal, setShowStaffModal] = useState(false);
+  const [addingStaff,    setAddingStaff]    = useState(false);
   const [showSendModal,  setShowSendModal]  = useState(false);
   const [shiftEdit,      setShiftEdit]      = useState({ start:"09:00", end:"17:00", typeIdx:0, locationId:"restaurant", brk:30 });
   const [newStaff,       setNewStaff]       = useState(()=>{
-    try{ const s=localStorage.getItem(JOB_TITLES_KEY); if(s){ const ts=JSON.parse(s); if(ts.length) return {name:"",role:ts[0].label,contracted:37.5,email:"",department:"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950}; } }catch{}
-    return {name:"",role:DEFAULT_JOB_TITLES[0].label,contracted:37.5,email:"",department:"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950};
+    try{ const s=localStorage.getItem(JOB_TITLES_KEY); if(s){ const ts=JSON.parse(s); if(ts.length) return {name:"",role:ts[0].label,contracted:37.5,email:"",department:"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950,allowedDays:["mon","tue","wed","thu","fri","sat","sun"]}; } }catch{}
+    return {name:"",role:DEFAULT_JOB_TITLES[0].label,contracted:37.5,email:"",department:"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950,allowedDays:["mon","tue","wed","thu","fri","sat","sun"]};
   });
   const [filterRole,     setFilterRole]     = useState("All");
   const [publishedWeeks, setPublishedWeeks] = useState(new Set());
@@ -396,29 +398,37 @@ export default function RotaSystem({ user, userRole }) {
   }
 
   async function addStaff(){
+    if(addingStaff) return;
     if(!newStaff.name.trim()) return;
-    const id=Date.now(), initials=newStaff.name.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
-    const contracted=Number(newStaff.contracted);
-    const newMember={
-      id, name:newStaff.name, role:newStaff.role, email:newStaff.email, avatar:initials,
-      contracted, color:STAFF_COLORS[staff.length%STAFF_COLORS.length], weekendsWorked:0,
-      annualHolidayDays:Number(newStaff.annualHolidayDays)||28,
-      annualisedHours:Number(newStaff.annualisedHours)||contracted*52,
-      absences:{}, department:newStaff.department||departments[0]?.id||"foh",
-      contractType:newStaff.contractType||"full_time",
-      maxDaysPerWeek:Number(newStaff.maxDaysPerWeek)||5,
-      allowedLocations:[],
-    };
-    await supabase.from('staff').upsert({id:String(id),data:newMember});
-    setStaff(p=>[...p,newMember]);
-    setNewStaff({name:"",role:jobTitles[0]?.label||"",contracted:37.5,email:"",department:departments[0]?.id||"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950});
-    setShowStaffModal(false); showNotif("Staff member added ✓");
+    setAddingStaff(true);
+    try{
+      const id=Date.now(), initials=newStaff.name.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
+      const contracted=Number(newStaff.contracted);
+      const newMember={
+        id, name:newStaff.name, role:newStaff.role, email:newStaff.email, avatar:initials,
+        contracted, color:STAFF_COLORS[staff.length%STAFF_COLORS.length], weekendsWorked:0,
+        annualHolidayDays:Number(newStaff.annualHolidayDays)||28,
+        annualisedHours:Number(newStaff.annualisedHours)||contracted*52,
+        absences:{}, department:newStaff.department||departments[0]?.id||"foh",
+        contractType:newStaff.contractType||"full_time",
+        maxDaysPerWeek:Number(newStaff.maxDaysPerWeek)||5,
+        allowedLocations:[],
+        allowedDays:newStaff.allowedDays||["mon","tue","wed","thu","fri","sat","sun"],
+      };
+      await supabase.from('staff').upsert({id:String(id),data:newMember});
+      setStaff(p=>[...p,newMember]);
+      setNewStaff({name:"",role:jobTitles[0]?.label||"",contracted:37.5,email:"",department:departments[0]?.id||"foh",contractType:"full_time",maxDaysPerWeek:5,annualHolidayDays:28,annualisedHours:1950,allowedDays:["mon","tue","wed","thu","fri","sat","sun"]});
+      setShowStaffModal(false); showNotif("Staff member added ✓");
+    } finally {
+      setAddingStaff(false);
+    }
   }
 
   function removeStaff(id){
+    console.log('removing staff id:',id,typeof id);
+    supabase.from('staff').delete({count:'exact'}).eq('id',String(id)).then(({error,count})=>console.log('delete result:',error,'rows deleted:',count));
     setStaff(p=>p.filter(s=>s.id!==id));
     setShifts(p=>{const n={...p};Object.keys(n).forEach(k=>{if(k.startsWith(`${id}-`))delete n[k];});return n;});
-    supabase.from('staff').delete().eq('id',String(id));
     if(selectedStaffId===id){ setSelectedStaffId(null); setAbsencePickerDate(null); }
   }
 
@@ -818,8 +828,12 @@ export default function RotaSystem({ user, userRole }) {
               }
             }
             if((s.absences||{})[dk]) return false;
-            if(assignedDays[s.id].has(dk)) return false;
             const isZeroHrs=(s.contractType||"full_time")==="zero_hours";
+            if(isZeroHrs){
+              const dayAbbrev=["sun","mon","tue","wed","thu","fri","sat"][date.getDay()];
+              if(!(s.allowedDays||[]).includes(dayAbbrev)) return false;
+            }
+            if(assignedDays[s.id].has(dk)) return false;
             if(!isZeroHrs&&(weekDays[s.id]?.[weekMon]||0)>=(s.maxDaysPerWeek||5)) return false;
             if(isWknd&&forcedOffSatSun.has(s.id)) return false;
             return true;
@@ -1652,6 +1666,35 @@ export default function RotaSystem({ user, userRole }) {
                         })}
                       </div>
                     </div>
+
+                    {member.contractType==="zero_hours"&&(
+                      <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,marginBottom:14}}>
+                        <div style={{fontSize:11,fontWeight:700,color:"var(--muted-foreground)",marginBottom:3}}>Available days</div>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                          <span style={{fontSize:11,color:"var(--muted-foreground)"}}>Select the days this staff member is available to work.</span>
+                          <button onClick={()=>updateStaffField(member.id,{allowedDays:(member.allowedDays||[]).length===7?[]:["mon","tue","wed","thu","fri","sat","sun"]})}
+                            style={{background:"none",border:"1px solid var(--border)",borderRadius:6,padding:"3px 9px",fontSize:11,fontFamily:"inherit",cursor:"pointer",color:"var(--muted-foreground)",fontWeight:600,whiteSpace:"nowrap"}}>
+                            {(member.allowedDays||[]).length===7?"Clear all":"Select all"}
+                          </button>
+                        </div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:7}}>
+                          {[["mon","Mon"],["tue","Tue"],["wed","Wed"],["thu","Thu"],["fri","Fri"],["sat","Sat"],["sun","Sun"]].map(([key,label])=>{
+                            const active=(member.allowedDays||[]).includes(key);
+                            return(
+                              <button key={key}
+                                onClick={()=>{
+                                  const cur=member.allowedDays||[];
+                                  updateStaffField(member.id,{allowedDays:active?cur.filter(d=>d!==key):[...cur,key]});
+                                }}
+                                style={{display:"flex",alignItems:"center",gap:6,padding:"7px 11px",borderRadius:8,border:`2px solid ${active?"hsl(160 84% 39%)":"var(--border)"}`,background:active?"hsl(160 84% 39% / 0.08)":"var(--background)",color:active?"hsl(160 84% 25%)":"var(--muted-foreground)",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600,transition:"all .12s"}}>
+                                {label}
+                                {active&&<span style={{marginLeft:2,fontSize:10}}>✓</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Monthly hours table */}
                     <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,overflow:"hidden"}}>
@@ -2862,6 +2905,26 @@ export default function RotaSystem({ user, userRole }) {
                 </div>
               )}
             </div>
+            {newStaff.contractType==="zero_hours"&&(
+              <div style={{marginBottom:14}}>
+                <label style={FL}>Available days</label>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:4}}>
+                  {[["mon","Mon"],["tue","Tue"],["wed","Wed"],["thu","Thu"],["fri","Fri"],["sat","Sat"],["sun","Sun"]].map(([key,label])=>{
+                    const active=(newStaff.allowedDays||[]).includes(key);
+                    return(
+                      <button key={key} type="button"
+                        onClick={()=>{
+                          const cur=newStaff.allowedDays||[];
+                          setNewStaff(p=>({...p,allowedDays:active?cur.filter(d=>d!==key):[...cur,key]}));
+                        }}
+                        style={{padding:"6px 11px",borderRadius:7,border:`2px solid ${active?"hsl(160 84% 39%)":"var(--border)"}`,background:active?"hsl(160 84% 39% / 0.08)":"var(--background)",color:active?"hsl(160 84% 25%)":"var(--muted-foreground)",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600}}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:14}}>
               <div>
                 <label style={FL}>Annual holiday (days)</label>
@@ -2872,7 +2935,9 @@ export default function RotaSystem({ user, userRole }) {
                 <input type="number" value={newStaff.annualisedHours} onChange={e=>setNewStaff(p=>({...p,annualisedHours:Number(e.target.value)||0}))} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
               </div>
             </div>
-            <button onClick={addStaff} style={{width:"100%",background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"10px",fontSize:13,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>Add Staff Member</button>
+            <button onClick={addStaff} disabled={addingStaff} style={{width:"100%",background:"var(--primary)",color:"var(--primary-foreground)",border:"none",borderRadius:7,padding:"10px",fontSize:13,fontFamily:"inherit",cursor:addingStaff?"default":"pointer",fontWeight:700,opacity:addingStaff?0.6:1}}>
+              {addingStaff?"Adding...":"Add Staff Member"}
+            </button>
           </div>
         </Backdrop>
       )}
