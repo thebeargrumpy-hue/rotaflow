@@ -1592,7 +1592,7 @@ export default function RotaSystem({ user, userRole }) {
                     <div style={{background:"var(--background)",border:"1px solid var(--border)",borderRadius:10,padding:14,marginBottom:14,display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:12}}>
                       <div>
                         <label style={FL}>Contracted hrs/wk</label>
-                        <input type="number" value={member.contracted??""} onChange={e=>updateStaffField(member.id,{contracted:Number(e.target.value)||0})} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+                        <input type="number" disabled={member.contractType==="zero_hours"} value={member.contractType==="zero_hours"?0:(member.contracted??"")} onChange={e=>updateStaffField(member.id,{contracted:Number(e.target.value)||0})} style={{...IS,fontFamily:"DM Mono,monospace",opacity:member.contractType==="zero_hours"?0.5:1}}/>
                       </div>
                       <div>
                         <label style={FL}>Annual holiday (days)</label>
@@ -2841,7 +2841,10 @@ export default function RotaSystem({ user, userRole }) {
             </div>
             <div style={{marginBottom:11}}>
               <label style={FL}>Contract Type</label>
-              <select value={newStaff.contractType||"full_time"} onChange={e=>setNewStaff(p=>({...p,contractType:e.target.value,maxDaysPerWeek:e.target.value==="zero_hours"?0:p.maxDaysPerWeek}))} style={IS}>
+              <select value={newStaff.contractType||"full_time"} onChange={e=>{
+                const isZero=e.target.value==="zero_hours";
+                setNewStaff(p=>({...p,contractType:e.target.value,maxDaysPerWeek:isZero?0:5,annualHolidayDays:isZero?0:28,annualisedHours:isZero?0:Number(p.contracted)*52,contracted:isZero?0:(p.contracted||37.5)}));
+              }} style={IS}>
                 <option value="full_time">Full Time</option>
                 <option value="part_time">Part Time</option>
                 <option value="zero_hours">Zero Hours / Casual</option>
@@ -2850,7 +2853,7 @@ export default function RotaSystem({ user, userRole }) {
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:11}}>
               <div>
                 <label style={FL}>Contracted hrs/week</label>
-                <input type="number" value={newStaff.contracted} onChange={e=>setNewStaff(p=>({...p,contracted:e.target.value,annualisedHours:Number(e.target.value)*52}))} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+                <input type="number" disabled={newStaff.contractType==="zero_hours"} value={newStaff.contractType==="zero_hours"?0:newStaff.contracted} onChange={e=>setNewStaff(p=>({...p,contracted:e.target.value,annualisedHours:Number(e.target.value)*52}))} style={{...IS,fontFamily:"DM Mono,monospace",opacity:newStaff.contractType==="zero_hours"?0.5:1}}/>
               </div>
               {newStaff.contractType!=="zero_hours"&&(
                 <div>
@@ -2862,7 +2865,7 @@ export default function RotaSystem({ user, userRole }) {
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9,marginBottom:14}}>
               <div>
                 <label style={FL}>Annual holiday (days)</label>
-                <input type="number" value={newStaff.annualHolidayDays} onChange={e=>setNewStaff(p=>({...p,annualHolidayDays:Number(e.target.value)||28}))} style={{...IS,fontFamily:"DM Mono,monospace"}}/>
+                <input type="number" disabled={newStaff.contractType==="zero_hours"} value={newStaff.contractType==="zero_hours"?0:newStaff.annualHolidayDays} onChange={e=>setNewStaff(p=>({...p,annualHolidayDays:Number(e.target.value)||28}))} style={{...IS,fontFamily:"DM Mono,monospace",opacity:newStaff.contractType==="zero_hours"?0.5:1}}/>
               </div>
               <div>
                 <label style={FL}>Annualised hours</label>
