@@ -490,6 +490,7 @@ export default function RotaSystem({ user, userRole }) {
   }
 
   async function saveSettings(){
+    if(locations.length===0||shiftTypes.length===0){ showNotif("Still loading settings — please wait and try again"); return; }
     const deletedLocIds=locations.filter(l=>!locDraft.find(d=>d.id===l.id)).map(l=>l.id);
     const deletedStIdxs=shiftTypes.filter(t=>!stDraft.find(d=>d.idx===t.idx)).map(t=>t.idx);
     setLocations([...locDraft]);
@@ -500,7 +501,7 @@ export default function RotaSystem({ user, userRole }) {
     const {error:locUpsertErr}=await supabase.from('locations').upsert(locDraft.map((l,i)=>({...l,sort_order:i})));
     if(locUpsertErr) console.error('Location upsert error:',locUpsertErr);
     if(deletedStIdxs.length>0){ const {error}=await supabase.from('shift_types').delete().in('idx',deletedStIdxs); if(error) console.error('Shift type delete error:',error); }
-    const {error:stUpsertErr}=await supabase.from('shift_types').upsert(stDraft.map((t,i)=>({...t,sort_order:i})));
+    const {error:stUpsertErr}=await supabase.from('shift_types').upsert(stDraft.map((t,i)=>({...t,id:String(t.idx),sort_order:i})));
     if(stUpsertErr) console.error('Shift type upsert error:',stUpsertErr);
     showNotif("Settings saved ✓");
   }
