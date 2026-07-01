@@ -679,56 +679,85 @@ export default function RotaSystem({ user, userRole }) {
       staffRotOffset[s.id]=idx%5; // stagger initial offsets 0–4 so different staff prefer different start days
     });
 
-    // Weekend coverage pre-pass: assign coverage slots on Sat/Sun for the whole month
-    // before weekday filling begins. weekDays already reflects the weekend assignment when
-    // Mon–Fri runs, so the 5-day cap naturally limits weekdays to (5 − weekendCovDays),
-    // keeping each staff member's weekly total at ≤ 5 without any special bypass.
-    const weekendCovPreFilled=new Set();
-    if(activeCoverageRules.length>0){
-      for(let d=1;d<=tot;d++){
-        const preDate=new Date(year,month,d);
-        const preDow=preDate.getDay();
-        if(preDow!==6&&preDow!==0) continue;
-        const preDk=fmtDateKey(preDate);
-        const preWeekMon=fmtDateKey(getMondayOf(preDate));
-        const prePlan=planner[deptId]||{weekdayTemplate:[],weekendTemplate:[],overrides:{}};
-        const preRegular=prePlan.overrides[preDk]!==undefined?prePlan.overrides[preDk]:prePlan.weekendTemplate;
-        const preFirst=preRegular[0];
-        activeCoverageRules.forEach(rule=>{
-          for(let ci=0;ci<rule.minPerDay;ci++){
-            const slotId=`cov_${rule.id}_${preDk}_${ci}`;
-            const uid=`${preDk}_${slotId}_0`;
-            const locationId=preFirst?.locationId||locations[0]?.id||"restaurant";
-            const startTime=preFirst?.startTime||"09:00";
-            const endTime=preFirst?.endTime||"17:00";
-            const slotHrs=calcHours(startTime,endTime,0);
-            let eligible=deptStaff.filter(s=>{
-              if(!(s.allowedLocations||[]).includes(locationId)) return false;
-              if(staffJtId[s.id]!==rule.jobTitleId) return false;
-              if((s.absences||{})[preDk]) return false;
-              if(assignedDays[s.id].has(preDk)) return false;
+    const weekendCovPreFilled = new Set();
+    if (activeCoverageRules.length > 0) {
+      // Group weekend days by week so we assign WHOLE weekends to one person
+      const weekendWeekMap = {}; // weekMon -> [{ dk, date }]
+      for (let d = 1; d <= tot; d++) {
+        const preDate = new Date(year, month, d);
+        const preDow = preDate.getDay();
+        if (preDow !== 6 && preDow !== 0) continue;
+        const preDk = fmtDateKey(preDate);
+        const preWeekMon = fmtDateKey(getMondayOf(preDate));
+        if (!weekendWeekMap[preWeekMon]) weekendWeekMap[preWeekMon] = [];
+        weekendWeekMap[preWeekMon].push({ dk: preDk, date: preDate });
+      }
+      const sortedWeekMons = Object.keys(weekendWeekMap).sort();
+
+      activeCoverageRules.forEach(rule => {
+        sortedWeekMons.forEach(preWeekMon => {
+          const wkndDays = weekendWeekMap[preWeekMon]; // [{ dk, date }] — Sat and/or Sun
+
+          for (let ci = 0; ci < rule.minPerDay; ci++) {
+            // Use first available day to determine location
+            const refDay = wkndDays[0];
+            const refPlan = planner[deptId] || { weekdayTemplate: [], weekendTemplate: [], overrides: {} };
+            const refTemplate = refPlan.overrides[refDay.dk] !== undefined
+              ? refPlan.overrides[refDay.dk]
+              : refPlan.weekendTemplate;
+            const refFirst = refTemplate[0];
+            const refLocationId = refFirst?.locationId || locations[0]?.id || 'restaurant';
+
+            // Eligible staff must be free on BOTH Saturday AND Sunday this week
+            let eligible = deptStaff.filter(s => {
+              if (!(s.allowedLocations || []).includes(refLocationId)) return false;
+              const ruleLabel = (jtSource.find(jt => jt.id === rule.jobTitleId)?.label || '').toLowerCase();
+              const isTeamLeaderRule = ruleLabel === 'team leader';
+              if (staffJtId[s.id] !== rule.jobTitleId && !(isTeamLeaderRule && isSupervisor(s))) return false;
+              if (wkndDays.some(wd => (s.absences || {})[wd.dk])) return false;
+              if (wkndDays.some(wd => assignedDays[s.id].has(wd.dk))) return false;
               return true;
             });
-            eligible=eligible.slice().sort((a,b)=>{
-              const aW=proposalWknd[a.id]||0,bW=proposalWknd[b.id]||0;
-              if(aW!==bW) return aW-bW;
-              return (staffMonthShifts[a.id]||0)-(staffMonthShifts[b.id]||0);
+
+            eligible = eligible.slice().sort((a, b) => {
+              const aW = proposalWknd[a.id] || 0, bW = proposalWknd[b.id] || 0;
+              if (aW !== bW) return aW - bW;
+              return (staffMonthShifts[a.id] || 0) - (staffMonthShifts[b.id] || 0);
             });
-            if(eligible.length>0){
-              const chosen=eligible[0];
-              allShifts.push({uid,date:preDk,locationId,startTime,endTime,staffId:chosen.id,unfilled:false,isCoverageSlot:true});
-              assignedDays[chosen.id].add(preDk);
-              weekDays[chosen.id][preWeekMon]=(weekDays[chosen.id][preWeekMon]||0)+1;
-              weekHrs[chosen.id][preWeekMon]=(weekHrs[chosen.id][preWeekMon]||0)+slotHrs;
-              staffMonthShifts[chosen.id]++;
-              proposalWknd[chosen.id]++;
-            } else {
-              allShifts.push({uid,date:preDk,locationId,startTime,endTime,staffId:null,unfilled:true,isCoverageSlot:true});
-            }
-            weekendCovPreFilled.add(uid);
+
+            const chosen = eligible.length > 0 ? eligible[0] : null;
+
+            // Assign the chosen person to ALL days in this weekend (Sat + Sun together)
+            wkndDays.forEach(wd => {
+              const dayPlan = planner[deptId] || { weekdayTemplate: [], weekendTemplate: [], overrides: {} };
+              const dayTemplate = dayPlan.overrides[wd.dk] !== undefined
+                ? dayPlan.overrides[wd.dk]
+                : dayPlan.weekendTemplate;
+              const dayFirst = dayTemplate[0];
+              const dayLocationId = dayFirst?.locationId || locations[0]?.id || 'restaurant';
+              const startTime = dayFirst?.startTime || '09:00';
+              const endTime = dayFirst?.endTime || '17:00';
+              const slotHrs = calcHours(startTime, endTime, 0);
+              const slotId = `cov_${rule.id}_${wd.dk}_${ci}`;
+              const uid = `${wd.dk}_${slotId}_0`;
+
+              if (chosen) {
+                allShifts.push({ uid, date: wd.dk, locationId: dayLocationId, startTime, endTime, staffId: chosen.id, unfilled: false, isCoverageSlot: true });
+                assignedDays[chosen.id].add(wd.dk);
+                weekDays[chosen.id][preWeekMon] = (weekDays[chosen.id][preWeekMon] || 0) + 1;
+                weekHrs[chosen.id][preWeekMon] = (weekHrs[chosen.id][preWeekMon] || 0) + slotHrs;
+                staffMonthShifts[chosen.id]++;
+              } else {
+                allShifts.push({ uid, date: wd.dk, locationId: dayLocationId, startTime, endTime, staffId: null, unfilled: true, isCoverageSlot: true });
+              }
+              weekendCovPreFilled.add(uid);
+            });
+
+            // Increment proposalWknd once per weekend (not per day) for fair rotation
+            if (chosen) proposalWknd[chosen.id]++;
           }
         });
-      }
+      });
     }
 
     for(let d=1;d<=tot;d++){
@@ -820,9 +849,10 @@ export default function RotaSystem({ user, userRole }) {
             if(!(s.allowedLocations||[]).includes(slot.locationId)) return false;
             if((slot.allowedJobTitles||[]).length>0){
               const sJtId=staffJtId[s.id];
-              // Strict slots: no supervisor fallback — only exact job title match counts
+              // Strict slots: no supervisor fallback — except Team Leader coverage rules, which Managers/Supervisors can cover
               if(slot.strict){
-                if(!slot.allowedJobTitles.includes(sJtId)) return false;
+                const isTeamLeaderSlot=slot.allowedJobTitles.some(jtId=>(jtSource.find(jt=>jt.id===jtId)?.label||"").toLowerCase()==="team leader");
+                if(!slot.allowedJobTitles.includes(sJtId)&&!(isTeamLeaderSlot&&isSupervisor(s))) return false;
               } else {
                 if(!slot.allowedJobTitles.includes(sJtId)&&!isSupervisor(s)) return false;
               }
