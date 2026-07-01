@@ -945,6 +945,25 @@ export default function RotaSystem({ user, userRole }) {
       }
     }
 
+    // Contracted hours monthly summary
+    const weeksInMonth = new Set(
+      Array.from({ length: tot }, (_, i) =>
+        fmtDateKey(getMondayOf(new Date(year, month, i + 1)))
+      )
+    ).size;
+
+    const contractedHoursSummary = deptStaff
+      .filter(s => (s.contractType || 'full_time') !== 'zero_hours' && (s.contracted || 0) > 0)
+      .map(s => {
+        const planned = allShifts
+          .filter(sh => String(sh.staffId) === String(s.id) && !sh.unfilled)
+          .reduce((acc, sh) => acc + calcHours(sh.startTime, sh.endTime, 0), 0);
+        const contracted = (s.contracted || 0) * weeksInMonth;
+        const variance = planned - contracted;
+        return { id: s.id, name: s.name, planned, contracted, variance };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
     // Group into Mon-Sun calendar weeks
     const firstMon=getMondayOf(new Date(year,month,1));
     const lastDayKey=fmtDateKey(new Date(year,month,tot));
@@ -1030,7 +1049,7 @@ export default function RotaSystem({ user, userRole }) {
       ws=addDays(ws,7);
     }
 
-    setProposedRota({year,month,deptId,deptLabel,weeks,approved:[],staffFullWkndOff:{...fullWkndCount}});
+    setProposedRota({year,month,deptId,deptLabel,weeks,approved:[],staffFullWkndOff:{...fullWkndCount},contractedHoursSummary});
     setReviewWeekIdx(0);
     setWarningApprovals({});
     setAssigningUid(null);
@@ -2169,6 +2188,41 @@ export default function RotaSystem({ user, userRole }) {
                         return(
                           <div key={s.id} style={{fontSize:11,padding:"3px 9px",borderRadius:6,background:ok?"#F0FDF4":"#FFF5F5",border:`1px solid ${ok?"#6ee7b7":"#fca5a5"}`,color:ok?"#047857":"#dc2626",fontWeight:500,whiteSpace:"nowrap"}}>
                             {s.name} — {count} full weekend{count!==1?"s":""} off this month {ok?"✓":"⚠"}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Contracted Hours Monthly Summary */}
+                {(proposedRota.contractedHoursSummary||[]).length > 0 && (
+                  <div style={{ marginTop: '2rem' }}>
+                    <h3 style={{ color: 'white', marginBottom: '0.75rem', fontSize: '0.95rem', fontWeight: 600 }}>
+                      Contracted Hours — {new Date(proposedRota.year, proposedRota.month).toLocaleString('default', { month: 'long', year: 'numeric' })}
+                    </h3>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      {(proposedRota.contractedHoursSummary||[]).map(s => {
+                        const absVariance = Math.abs(s.variance);
+                        const colour = absVariance <= 8 ? '#10b981' : absVariance <= 16 ? '#f59e0b' : '#ef4444';
+                        const sign = s.variance >= 0 ? '+' : '';
+                        return (
+                          <div key={s.id} style={{
+                            background: 'rgba(0,0,0,0.3)',
+                            border: `1px solid ${colour}40`,
+                            borderLeft: `3px solid ${colour}`,
+                            borderRadius: '6px',
+                            padding: '0.4rem 0.75rem',
+                            fontSize: '0.8rem',
+                            color: 'white',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            <span style={{ fontWeight: 600, color: 'white' }}>{s.name}</span>
+                            <span style={{ color: '#94a3b8', margin: '0 0.4rem' }}> — </span>
+                            <span style={{ color: '#cbd5e1' }}>{Math.round(s.planned)}h / {Math.round(s.contracted)}h</span>
+                            <span style={{ color: colour, marginLeft: '0.4rem', fontWeight: 600 }}>
+                              ({sign}{Math.round(s.variance)}h)
+                            </span>
                           </div>
                         );
                       })}
