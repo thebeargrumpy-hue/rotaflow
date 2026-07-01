@@ -449,7 +449,7 @@ export default function RotaSystem({ user, userRole }) {
     const toH=n=>Math.max(0,Math.min(255,Math.round(n))).toString(16).padStart(2,"0");
     const bg=`#${toH(r*.1+255*.9)}${toH(g*.1+255*.9)}${toH(b*.1+255*.9)}`;
     const text=`#${toH(r*.55)}${toH(g*.55)}${toH(b*.55)}`;
-    const short=label.split(/[\s/]+/).filter(w=>/[a-zA-Z]/.test(w[0]||"")).map(w=>w[0].toUpperCase()).join("").slice(0,4)||"?";
+    const short=label.split(/[\s/]+/).filter(w=>/[a-zA-Z]/.test(w[0]||"")).map(w=>w[0].toUpperCase()).join("").slice(0,3)||"?";
     return {border:hex,dot:hex,bg,text,short};
   }
 
@@ -865,9 +865,30 @@ export default function RotaSystem({ user, userRole }) {
             }
             if(assignedDays[s.id].has(dk)) return false;
             if(!isZeroHrs&&(weekDays[s.id]?.[weekMon]||0)>=(s.maxDaysPerWeek||5)) return false;
+            if(!isZeroHrs){
+              const workedThisWeek = weekHrs[s.id]?.[weekMon] || 0;
+              const weeklyContracted = s.contracted || 40;
+              if(workedThisWeek >= weeklyContracted) return false;
+              const slotHrs = calcHours(slot.startTime, slot.endTime, slot.break || 0);
+              const underIfSkipped = Math.abs(workedThisWeek - weeklyContracted);
+              const overIfTaken = Math.abs(workedThisWeek + slotHrs - weeklyContracted);
+              if(overIfTaken > underIfSkipped) return false;
+            }
             if(isWknd&&forcedOffSatSun.has(s.id)) return false;
             return true;
           });
+
+          // Hard filter: only use zero-hours staff if all contracted eligible staff
+          // have already met or exceeded their weekly contracted hours
+          const eligibleContracted = eligible.filter(s => (s.contractType || 'full_time') !== 'zero_hours');
+          const contractedStillNeedHours = eligibleContracted.some(s => {
+            const workedThisWeek = weekHrs[s.id]?.[weekMon] || 0;
+            const weeklyContracted = s.contracted || 40;
+            return workedThisWeek < weeklyContracted;
+          });
+          if (contractedStillNeedHours) {
+            eligible = eligibleContracted;
+          }
 
           eligible=eligible.slice().sort((a,b)=>{
             // 1. Weekend: fewest weekend days this month first (month-level fairness)
@@ -1454,7 +1475,7 @@ export default function RotaSystem({ user, userRole }) {
                               <div className="chip" style={{background:l.bg,border:`1.5px solid ${l.border}`,borderRadius:5,padding:"3px 3px",width:"100%"}}>
                                 <div style={{display:"flex",alignItems:"center",gap:2,marginBottom:1}}>
                                   <div style={{width:5,height:5,borderRadius:"50%",background:l.dot,flexShrink:0}}/>
-                                  <span style={{fontSize:8,fontWeight:700,color:l.text}}>{l.short}</span>
+                                  <span style={{fontSize:7,fontWeight:700,color:l.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%",display:"block"}}>{l.label}</span>
                                 </div>
                                 <div style={{fontSize:9,fontWeight:700,color:getStype(shift.typeIdx).text,fontFamily:"DM Mono,monospace"}}>{shift.start}–{shift.end}</div>
                                 <div style={{fontSize:8,color:l.border}}>{calcHours(shift.start,shift.end,shift.brk).toFixed(1)}h</div>

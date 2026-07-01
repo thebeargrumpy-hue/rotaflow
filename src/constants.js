@@ -8,10 +8,10 @@ for (let h = 0; h < 24; h++) {
 }
 
 export const LOCATIONS = [
-  { id:"restaurant", label:"Restaurant",     short:"REST", bg:"#EEF2FF", border:"#6366f1", text:"#3730a3", dot:"#6366f1" },
-  { id:"cafe",       label:"Visitor Café",   short:"CAFÉ", bg:"#F0FDF4", border:"#16a34a", text:"#14532d", dot:"#16a34a" },
-  { id:"events",     label:"Events / Hire",  short:"EVNT", bg:"#FFF7ED", border:"#ea580c", text:"#7c2d12", dot:"#ea580c" },
-  { id:"memorial",   label:"Memorial Gdn",   short:"MEMO", bg:"#F0F9FF", border:"#0284c7", text:"#0c4a6e", dot:"#0284c7" },
+  { id:"restaurant", label:"Restaurant",     short:"RES", bg:"#EEF2FF", border:"#6366f1", text:"#3730a3", dot:"#6366f1" },
+  { id:"cafe",       label:"Visitor Café",   short:"CAF", bg:"#F0FDF4", border:"#16a34a", text:"#14532d", dot:"#16a34a" },
+  { id:"events",     label:"Events / Hire",  short:"EVT", bg:"#FFF7ED", border:"#ea580c", text:"#7c2d12", dot:"#ea580c" },
+  { id:"memorial",   label:"Memorial Gdn",   short:"MEM", bg:"#F0F9FF", border:"#0284c7", text:"#0c4a6e", dot:"#0284c7" },
 ];
 
 export const SHIFT_TYPES = [
